@@ -1,4 +1,4 @@
-name: Build RootHide-Compatible DEB
+name: Build RootHide DEB
 
 on:
   workflow_dispatch:
@@ -14,8 +14,10 @@ jobs:
     timeout-minutes: 35
     env:
       THEOS: ${{ github.workspace }}/.theos
-      THEOS_REVISION: 16362d3aa83a0acd56df4493d575d34306d42478
-      THEOS_PACKAGE_SCHEME: rootless
+      THEOS_PACKAGE_SCHEME: roothide
+      ARCHS: arm64 arm64e
+      TARGET: iphone:clang:16.5:16.0
+      DEB_ARCH: iphoneos-arm64
 
     steps:
       - name: Checkout
@@ -24,17 +26,31 @@ jobs:
       - name: Install packaging dependencies
         run: brew install dpkg ldid xz
 
-      - name: Install pinned Theos
+      - name: Install RootHide Theos
         run: |
-          git clone --filter=blob:none https://github.com/theos/theos.git "$THEOS"
-          git -C "$THEOS" checkout --detach "$THEOS_REVISION"
+          git clone --filter=blob:none https://github.com/roothide/theos.git "$THEOS"
           git -C "$THEOS" submodule update --init --recursive --depth 1
-          test "$(git -C "$THEOS" rev-parse HEAD)" = "$THEOS_REVISION"
+          git -C "$THEOS" rev-parse HEAD
+
+      - name: Install patched iOS 16.5 SDK
+        run: |
+          rm -rf "$RUNNER_TEMP/theos-sdks"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
+          git -C "$RUNNER_TEMP/theos-sdks" sparse-checkout set iPhoneOS16.5.sdk
+          mkdir -p "$THEOS/sdks"
+          rm -rf "$THEOS/sdks/iPhoneOS16.5.sdk"
+          cp -a "$RUNNER_TEMP/theos-sdks/iPhoneOS16.5.sdk" "$THEOS/sdks/"
+          test -f "$THEOS/sdks/iPhoneOS16.5.sdk/System/Library/PrivateFrameworks/Preferences.framework/Preferences.tbd"
+          echo "Using patched SDK: $THEOS/sdks/iPhoneOS16.5.sdk"
 
       - name: Build package
         run: |
           make clean
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          make package FINALPACKAGE=1 \
+            THEOS_PACKAGE_SCHEME=roothide \
+            ARCHS="arm64 arm64e" \
+            TARGET="iphone:clang:16.5:16.0" \
+            DEB_ARCH=iphoneos-arm64
           ls -lah packages/
 
       - name: Verify package before publishing
@@ -63,7 +79,14 @@ jobs:
 
           echo "--- Mach-O ---"
           file "$DYLIB"
-          lipo -archs "$DYLIB"
+          SLICES="$(lipo -archs "$DYLIB")"
+          echo "$SLICES"
+          echo "$SLICES" | grep -qw arm64
+          echo "$SLICES" | grep -qw arm64e
+          if echo "$SLICES" | grep -Eq 'armv7|armv7s'; then
+            echo "Unexpected 32-bit slice: $SLICES" >&2
+            exit 1
+          fi
           echo "--- Linked libraries ---"
           otool -L "$DYLIB"
           echo "--- Filter plist ---"
@@ -73,15 +96,16 @@ jobs:
             echo "version=$VERSION"
             echo "architecture=$ARCH"
             echo "dylib=$DYLIB"
-            echo "slices=$(lipo -archs "$DYLIB")"
-            echo "theos=$THEOS_REVISION"
-            echo "scheme=rootless-on-roothide"
+            echo "slices=$SLICES"
+            echo "theos=$(git -C "$THEOS" rev-parse HEAD)"
+            echo "scheme=roothide"
+            echo "target=$TARGET"
           } > packages/BUILD-VERIFICATION.txt
 
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: SplitWindow-v0.3.0-RootHide-Compatible
+          name: SplitWindow-v0.3.1-RootHide
           path: |
             packages/*.deb
             packages/BUILD-VERIFICATION.txt

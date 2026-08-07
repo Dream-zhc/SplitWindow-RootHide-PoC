@@ -1,9 +1,8 @@
 # SplitWindow PoC — iOS 16 / Dopamine RootHide
 
-> v0.3.0 deliberately uses a standard **rootless** package on RootHide's
-> rootless compatibility layer. This matches the packaging path already proven
-> on the target device and removes native RootHide relocation/toolchain details
-> from the SpringBoard black-screen investigation.
+> v0.3.1 builds with the official `roothide/theos` fork and
+> `THEOS_PACKAGE_SCHEME=roothide`. The build is pinned to the patched iOS 16.5
+> SDK with an iOS 16.0 deployment target and only produces arm64/arm64e slices.
 
 一个用于验证 **真实 App Scene 悬浮小窗** 的最小 Theos tweak 工程。
 

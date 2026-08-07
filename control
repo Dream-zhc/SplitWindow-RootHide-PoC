@@ -1,8 +1,8 @@
 Package: com.dream.splitwindow
 Name: SplitWindow PoC
-Version: 0.3.0
+Version: 0.3.1
 Architecture: iphoneos-arm64
-Description: iOS 16 SplitWindow proof-of-concept built as a rootless package for RootHide compatibility.
+Description: iOS 16 SplitWindow proof-of-concept built natively for Dopamine RootHide.
 Maintainer: Dream
 Author: Dream
 Section: Tweaks
