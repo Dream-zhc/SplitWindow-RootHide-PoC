@@ -1,9 +1,10 @@
-#import <CoreFoundation/CoreFoundation.h>
-#import <dispatch/dispatch.h>
-#import <dlfcn.h>
-#import <stdbool.h>
-#import <stdio.h>
-#import <string.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <dispatch/dispatch.h>
+#include <dlfcn.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
 
 static const CFStringRef SWPreferencesDomain = CFSTR("com.dream.splitwindow");
 static const CFStringRef SWActivationNotification = CFSTR("com.dream.splitwindow/activationRequested");
@@ -74,35 +75,51 @@ static bool SWLoadFeatureIfNeeded(void) {
     return true;
 }
 
-static void SWActivationChanged(__unused CFNotificationCenterRef center,
-                                __unused void *observer,
-                                __unused CFStringRef name,
-                                __unused const void *object,
-                                __unused CFDictionaryRef userInfo) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!SWPreferenceEnabled()) {
-            if (SWFeatureReloadFunction) SWFeatureReloadFunction();
-            return;
-        }
+static void SWHandleActivationOnMain(void *context) {
+    (void)context;
+    if (!SWPreferenceEnabled()) {
+        if (SWFeatureReloadFunction) SWFeatureReloadFunction();
+        return;
+    }
 
-        if (!SWLoadFeatureIfNeeded()) return;
-        SWFeatureStartFunction();
-    });
+    if (!SWLoadFeatureIfNeeded()) return;
+    SWFeatureStartFunction();
 }
 
-static void SWPreferencesChanged(__unused CFNotificationCenterRef center,
-                                 __unused void *observer,
-                                 __unused CFStringRef name,
-                                 __unused const void *object,
-                                 __unused CFDictionaryRef userInfo) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (SWFeatureReloadFunction) SWFeatureReloadFunction();
-    });
+static void SWHandlePreferencesOnMain(void *context) {
+    (void)context;
+    if (SWFeatureReloadFunction) SWFeatureReloadFunction();
+}
+
+static void SWActivationChanged(CFNotificationCenterRef center,
+                                void *observer,
+                                CFStringRef name,
+                                const void *object,
+                                CFDictionaryRef userInfo) {
+    (void)center;
+    (void)observer;
+    (void)name;
+    (void)object;
+    (void)userInfo;
+    dispatch_async_f(dispatch_get_main_queue(), NULL, SWHandleActivationOnMain);
+}
+
+static void SWPreferencesChanged(CFNotificationCenterRef center,
+                                 void *observer,
+                                 CFStringRef name,
+                                 const void *object,
+                                 CFDictionaryRef userInfo) {
+    (void)center;
+    (void)observer;
+    (void)name;
+    (void)object;
+    (void)userInfo;
+    dispatch_async_f(dispatch_get_main_queue(), NULL, SWHandlePreferencesOnMain);
 }
 
 __attribute__((constructor))
 static void SWLoaderInitialize(void) {
-    // Deliberately minimal. No Foundation, UIKit, file I/O, preferences read,
+    // Deliberately minimal. Pure C: no Objective-C runtime, UIKit, file I/O,
     // UIWindow creation, FrontBoard lookup, or feature dylib loading here.
     CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
     CFNotificationCenterAddObserver(center,

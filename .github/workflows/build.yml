@@ -91,7 +91,7 @@ jobs:
           fi
           echo "--- Loader linked libraries ---"
           otool -L "$DYLIB"
-          if otool -L "$DYLIB" | grep -Eq '/UIKit\\.framework/|/QuartzCore\\.framework/|/FrontBoard'; then
+          if otool -L "$DYLIB" | grep -Eq '/Foundation\\.framework/|/UIKit\\.framework/|/QuartzCore\\.framework/|/FrontBoard|libobjc'; then
             echo "Unsafe loader dependency detected" >&2
             exit 1
           fi

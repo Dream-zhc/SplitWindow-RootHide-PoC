@@ -6,8 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = SplitWindow
 
-SplitWindow_FILES = Loader.m
+SplitWindow_FILES = Loader.c
 SplitWindow_FRAMEWORKS = CoreFoundation
-SplitWindow_CFLAGS = -fobjc-arc
 
 include $(THEOS_MAKE_PATH)/tweak.mk
