@@ -17,7 +17,6 @@ jobs:
       THEOS_PACKAGE_SCHEME: roothide
       ARCHS: arm64 arm64e
       TARGET: iphone:clang:16.5:16.0
-      DEB_ARCH: iphoneos-arm64
 
     steps:
       - name: Checkout
@@ -49,8 +48,7 @@ jobs:
           make package FINALPACKAGE=1 \
             THEOS_PACKAGE_SCHEME=roothide \
             ARCHS="arm64 arm64e" \
-            TARGET="iphone:clang:16.5:16.0" \
-            DEB_ARCH=iphoneos-arm64
+            TARGET="iphone:clang:16.5:16.0"
           ls -lah packages/
 
       - name: Verify package before publishing
@@ -64,7 +62,10 @@ jobs:
           echo "Package: $DEB"
           echo "Version: $VERSION"
           echo "Architecture: $ARCH"
-          test "$ARCH" = "iphoneos-arm64"
+          if [ "$ARCH" != "iphoneos-arm64e" ]; then
+            echo "Unexpected RootHide package architecture: $ARCH (expected iphoneos-arm64e)" >&2
+            exit 1
+          fi
 
           rm -rf verify-root
           mkdir verify-root

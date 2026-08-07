@@ -264,8 +264,9 @@ HOST-5
 export ARCHS = arm64 arm64e
 export TARGET = iphone:clang:16.5:16.0
 export THEOS_PACKAGE_SCHEME = roothide
-export DEB_ARCH = iphoneos-arm64
 ```
+
+`control` 源文件保持 Theos 输入值 `iphoneos-arm64`；经过 native `roothide` packaging scheme 后，最终 Debian package Architecture 必须解析为 `iphoneos-arm64e`。不要再用 `DEB_ARCH=iphoneos-arm64` 覆盖 RootHide scheme 的转换结果。
 
 - `Tweak/Makefile` 和 `Prefs/Makefile` 也显式指定：
 
@@ -299,8 +300,9 @@ iOS 16.0
 ARCHS="arm64 arm64e"
 TARGET="iphone:clang:16.5:16.0"
 THEOS_PACKAGE_SCHEME=roothide
-DEB_ARCH=iphoneos-arm64
 ```
+
+不要传 `DEB_ARCH=iphoneos-arm64`。`roothide` scheme 应产出 `iphoneos-arm64e` package；Mach-O 本体仍继续验证 `arm64 + arm64e` 两个 slices。
 
 - CI 还会检查最终 dylib slices，必须包含：
 
@@ -452,7 +454,7 @@ RootHide 最危险的地方是：
 ```text
 roothide/theos
 THEOS_PACKAGE_SCHEME=roothide
-iphoneos-arm64 package arch
+iphoneos-arm64e package arch
 arm64 + arm64e Mach-O slices
 ```
 
@@ -647,7 +649,7 @@ iOS 9.0
 
 必须确认：
 
-- Package Architecture：`iphoneos-arm64`
+- Package Architecture：`iphoneos-arm64e`
 - `SplitWindow.dylib` slices：`arm64 arm64e`
 - 不包含 armv7/armv7s。
 - package 内存在：
