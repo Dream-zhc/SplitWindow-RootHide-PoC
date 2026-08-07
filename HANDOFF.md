@@ -8,6 +8,20 @@
 
 Do not treat that dependency as unsafe. The strict "no UIKit/Foundation/Preferences" rule applies only to the automatically injected SpringBoard loader `SplitWindow.dylib`, not to the Settings preference bundle.
 
+### 0.4.3 activation-chain repair
+
+实机 0.4.2 已确认设置页正常、开关可写，但启用后 SpringBoard 没有悬浮按钮、没有边缘入口，而且 `/var/mobile/SplitWindow/logs/loader.log` 不存在。问题已收敛到 `Settings -> Darwin notification -> Loader -> Feature` 激活链。
+
+- 不再依赖 Root.plist 的 `PostNotification` 隐式行为；`SWRootListController` 的 `setPreferenceValue:specifier:` 显式持久化 preference 并显式发送 Darwin notification。
+- `EnabledV040` 打开时发送 `com.dream.splitwindow/activationRequested`；关闭或修改悬浮按钮时发送 `preferencesChanged`。
+- 打开 SplitWindow 设置页且 Enabled 已为 ON 时会重新发送 activation，升级后不需要人为 OFF -> ON。
+- 设置页增加“启动 / 重新加载小窗”按钮作为明确 activation 入口。
+- Loader 收到 activation 后不再二次读取 Enabled；activation 本身只来自明确用户动作。
+- RootHide 下 `SplitWindowFeature.dylib` 必须使用官方 `<roothide.h>` 的 `jbroot("/Library/SplitWindow/SplitWindowFeature.dylib")` 获取真实路径。官方文档明确要求 jailbreak 文件路径经过 `jbroot()`；禁止继续依赖 `dladdr()` 猜随机 jbroot。非 RootHide 本地 sanity build 才保留旧路径推导 fallback。
+- Loader 注入 8 秒后必须写 `/var/mobile/SplitWindow/logs/loader.log` 的 `BOOT loader alive after 8s`，即便 activation 没发生也能判断 SpringBoard loader 是否真正注入。
+- 显式 activation 后 Overlay 直接显示入口窗口，不再马上用第二次跨进程 preference 读取把窗口隐藏。
+- 右侧 14pt 手势区增加 4x64 可见竖向 handle。启动成功后应同时看到 handle，以及在“显示悬浮按钮”开启时看到圆形悬浮按钮。
+
 # SplitWindow-RootHide 项目交接文档
 
 > 面向一个**完全没有上下文的新会话**。请先完整读完本文，再动代码。

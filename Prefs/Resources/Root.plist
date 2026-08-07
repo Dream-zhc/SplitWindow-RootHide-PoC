@@ -17,7 +17,6 @@
             <key>defaults</key><string>com.dream.splitwindow</string>
             <key>key</key><string>EnabledV040</string>
             <key>default</key><false/>
-            <key>PostNotification</key><string>com.dream.splitwindow/activationRequested</string>
         </dict>
         <dict>
             <key>cell</key><string>PSSwitchCell</string>
@@ -25,11 +24,15 @@
             <key>defaults</key><string>com.dream.splitwindow</string>
             <key>key</key><string>ShowFloatingButton</string>
             <key>default</key><true/>
-            <key>PostNotification</key><string>com.dream.splitwindow/preferencesChanged</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSButtonCell</string>
+            <key>label</key><string>启动 / 重新加载小窗</string>
+            <key>action</key><string>activateSplitWindow</string>
         </dict>
         <dict>
             <key>cell</key><string>PSGroupCell</string>
-            <key>footerText</key><string>当前安全验证阶段固定使用 Calculator / Notes。安装或 Respring 后保持待机，只有手动开启后才加载小窗功能模块。</string>
+            <key>footerText</key><string>当前固定使用 Calculator / Notes。启用后右侧会出现可见把手和悬浮按钮；右侧把手向左滑打开 App 面板。</string>
         </dict>
     </array>
 </dict>

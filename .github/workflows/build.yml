@@ -114,12 +114,14 @@ jobs:
             echo "Feature/FrontBoard code leaked into the SpringBoard loader" >&2
             exit 1
           fi
+          strings "$DYLIB" | grep -q 'BOOT loader alive after 8s'
           echo "--- Feature Mach-O ---"
           file "$FEATURE"
           FEATURE_SLICES="$(lipo -archs "$FEATURE")"
           echo "$FEATURE_SLICES"
           echo "$FEATURE_SLICES" | grep -qw arm64
           echo "$FEATURE_SLICES" | grep -qw arm64e
+          strings "$FEATURE" | grep -q 'START-4 explicit activation windows visible'
           echo "--- Preferences bundle ---"
           PREFS_BIN="$PREFS/SplitWindowPrefs"
           test -f "$PREFS_BIN"
@@ -128,6 +130,7 @@ jobs:
             echo "Preferences bundle is missing required Preferences.framework dependency" >&2
             exit 1
           fi
+          strings "$PREFS_BIN" | grep -q 'com.dream.splitwindow/activationRequested'
           strings "$PREFS_BIN" | grep -q 'SWRootListController'
           plutil -p "$PREF_ENTRY" | grep -q 'SplitWindow.png'
           echo "--- Filter plist ---"
@@ -150,7 +153,7 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: SplitWindow-v0.4.2-RootHide
+          name: SplitWindow-v0.4.3-RootHide
           path: |
             packages/*.deb
             packages/BUILD-VERIFICATION.txt

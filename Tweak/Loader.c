@@ -8,7 +8,13 @@
 #include <string.h>
 #include <sys/stat.h>
 
-static const CFStringRef SWPreferencesDomain = CFSTR("com.dream.splitwindow");
+#if __has_include(<roothide.h>)
+#include <roothide.h>
+#define SW_HAS_ROOTHIDE_API 1
+#else
+#define SW_HAS_ROOTHIDE_API 0
+#endif
+
 static const CFStringRef SWActivationNotification = CFSTR("com.dream.splitwindow/activationRequested");
 static const CFStringRef SWPreferencesNotification = CFSTR("com.dream.splitwindow/preferencesChanged");
 
@@ -37,22 +43,18 @@ static void SWLoaderLog(const char *format, ...) {
     fclose(file);
 }
 
-static bool SWPreferenceEnabled(void) {
-    CFPreferencesAppSynchronize(SWPreferencesDomain);
-    // v0.4 deliberately uses a new key. Old releases could leave Enabled=true
-    // behind after uninstall; that stale value must never activate this loader.
-    CFPropertyListRef value = CFPreferencesCopyAppValue(CFSTR("EnabledV040"), SWPreferencesDomain);
-    bool enabled = false;
-    if (value && CFGetTypeID(value) == CFBooleanGetTypeID()) {
-        enabled = CFBooleanGetValue((CFBooleanRef)value);
-    }
-    if (value) CFRelease(value);
-    return enabled;
-}
-
 static bool SWFeaturePath(char *buffer, size_t bufferSize) {
     if (!buffer || bufferSize == 0) return false;
 
+#if SW_HAS_ROOTHIDE_API
+    const char *resolved = jbroot("/Library/SplitWindow/SplitWindowFeature.dylib");
+    if (resolved && resolved[0] != '\0') {
+        int written = snprintf(buffer, bufferSize, "%s", resolved);
+        return written > 0 && (size_t)written < bufferSize;
+    }
+#endif
+
+    // Compatibility fallback for non-RootHide local sanity builds.
     Dl_info info = {0};
     if (dladdr((const void *)&SWLoaderInitialize, &info) == 0 || !info.dli_fname) return false;
 
@@ -110,13 +112,7 @@ static bool SWLoadFeatureIfNeeded(void) {
 
 static void SWHandleActivationOnMain(void *context) {
     (void)context;
-    bool enabled = SWPreferenceEnabled();
-    SWLoaderLog("ACTIVATION enabled=%d", enabled ? 1 : 0);
-    if (!enabled) {
-        if (SWFeatureReloadFunction) SWFeatureReloadFunction();
-        return;
-    }
-
+    SWLoaderLog("ACTIVATION explicit user request");
     if (!SWLoadFeatureIfNeeded()) {
         SWLoaderLog("ACTIVATION feature load failed");
         return;
@@ -140,6 +136,7 @@ static void SWActivationChanged(CFNotificationCenterRef center,
     (void)name;
     (void)object;
     (void)userInfo;
+    SWLoaderLog("NOTIFY activationRequested received");
     dispatch_async_f(dispatch_get_main_queue(), NULL, SWHandleActivationOnMain);
 }
 
@@ -153,13 +150,19 @@ static void SWPreferencesChanged(CFNotificationCenterRef center,
     (void)name;
     (void)object;
     (void)userInfo;
+    SWLoaderLog("NOTIFY preferencesChanged received");
     dispatch_async_f(dispatch_get_main_queue(), NULL, SWHandlePreferencesOnMain);
+}
+
+static void SWWriteBootMarker(void *context) {
+    (void)context;
+    SWLoaderLog("BOOT loader alive after 8s");
 }
 
 __attribute__((constructor))
 static void SWLoaderInitialize(void) {
-    // Deliberately minimal. Pure C: no Objective-C runtime, UIKit, file I/O,
-    // UIWindow creation, FrontBoard lookup, or feature dylib loading here.
+    // Deliberately minimal. Pure C: no Objective-C runtime, UIKit, immediate
+    // file I/O, UIWindow creation, FrontBoard lookup, or feature loading here.
     CFNotificationCenterRef center = CFNotificationCenterGetDarwinNotifyCenter();
     CFNotificationCenterAddObserver(center,
                                     NULL,
@@ -173,4 +176,9 @@ static void SWLoaderInitialize(void) {
                                     SWPreferencesNotification,
                                     NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)),
+                     dispatch_get_main_queue(),
+                     NULL,
+                     SWWriteBootMarker);
 }

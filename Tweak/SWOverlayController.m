@@ -85,8 +85,9 @@
         return;
     }
     self.started = YES;
-    SWFileLog(@"START-4 reloading preferences");
-    [self reloadPreferences];
+    self.edgeWindow.hidden = NO;
+    self.floatingWindow.hidden = ![SWPreferences showFloatingButton];
+    SWFileLog(@"START-4 explicit activation windows visible floating=%d", !self.floatingWindow.hidden);
     SWFileLog(@"START-5 overlay controller started");
 }
 
@@ -96,6 +97,16 @@
 
     UIView *edge = self.edgeWindow.rootViewController.view;
     edge.backgroundColor = UIColor.clearColor;
+
+    UIView *handle = [[UIView alloc] initWithFrame:CGRectMake(8.0,
+                                                              floor((CGRectGetHeight(screen) - 64.0) * 0.42),
+                                                              4.0,
+                                                              64.0)];
+    handle.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.72];
+    handle.layer.cornerRadius = 2.0;
+    handle.userInteractionEnabled = NO;
+    [edge addSubview:handle];
+
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(edgePan:)];
     [edge addGestureRecognizer:pan];
     self.edgeWindow.hidden = NO;

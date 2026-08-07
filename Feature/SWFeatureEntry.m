@@ -2,21 +2,22 @@
 #import "SWPreferences.h"
 #import <Foundation/Foundation.h>
 
-static void SWApplyFeaturePreferences(void) {
+static void SWStartFeature(void) {
     SWOverlayController *controller = [SWOverlayController sharedInstance];
-    if ([SWPreferences enabled]) {
-        [controller start];
-    }
-    [controller reloadPreferences];
+    [controller start];
+}
+
+static void SWReloadFeaturePreferences(void) {
+    [[SWOverlayController sharedInstance] reloadPreferences];
 }
 
 __attribute__((visibility("default")))
 void SWFeatureStart(void) {
     if ([NSThread isMainThread]) {
-        SWApplyFeaturePreferences();
+        SWStartFeature();
     } else {
         dispatch_async(dispatch_get_main_queue(), ^{
-            SWApplyFeaturePreferences();
+            SWStartFeature();
         });
     }
 }
@@ -24,10 +25,10 @@ void SWFeatureStart(void) {
 __attribute__((visibility("default")))
 void SWFeatureReload(void) {
     if ([NSThread isMainThread]) {
-        SWApplyFeaturePreferences();
+        SWReloadFeaturePreferences();
     } else {
         dispatch_async(dispatch_get_main_queue(), ^{
-            SWApplyFeaturePreferences();
+            SWReloadFeaturePreferences();
         });
     }
 }
