@@ -75,10 +75,14 @@ jobs:
           PLIST="$(find verify-root -type f -name 'SplitWindow.plist' -path '*DynamicLibraries*' -print -quit)"
           PREFS="$(find verify-root -type d -name 'SplitWindowPrefs.bundle' -print -quit)"
           FEATURE="$(find verify-root -type f -name 'SplitWindowFeature.dylib' -print -quit)"
+          PREF_ENTRY="$(find verify-root -type f -name 'SplitWindow.plist' -path '*PreferenceLoader/Preferences*' -print -quit)"
+          PREF_ICON="$(find verify-root -type f -name 'SplitWindow.png' -path '*PreferenceLoader/Preferences*' -print -quit)"
           test -n "$DYLIB"
           test -n "$PLIST"
           test -n "$PREFS"
           test -n "$FEATURE"
+          test -n "$PREF_ENTRY"
+          test -n "$PREF_ICON"
 
           echo "--- Loader Mach-O ---"
           file "$DYLIB"
@@ -106,6 +110,16 @@ jobs:
           echo "$FEATURE_SLICES"
           echo "$FEATURE_SLICES" | grep -qw arm64
           echo "$FEATURE_SLICES" | grep -qw arm64e
+          echo "--- Preferences bundle ---"
+          PREFS_BIN="$PREFS/SplitWindowPrefs"
+          test -f "$PREFS_BIN"
+          otool -L "$PREFS_BIN"
+          if otool -L "$PREFS_BIN" | grep -q '/PrivateFrameworks/Preferences.framework/'; then
+            echo "Preferences bundle unexpectedly depends on Preferences.framework" >&2
+            exit 1
+          fi
+          strings "$PREFS_BIN" | grep -q 'SWRootListController'
+          plutil -p "$PREF_ENTRY" | grep -q 'SplitWindow.png'
           echo "--- Filter plist ---"
           plutil -p "$PLIST"
 
@@ -116,6 +130,8 @@ jobs:
             echo "slices=$SLICES"
             echo "feature=$FEATURE"
             echo "feature_slices=$FEATURE_SLICES"
+            echo "preferences=$PREFS_BIN"
+            echo "preference_icon=$PREF_ICON"
             echo "theos=$(git -C "$THEOS" rev-parse HEAD)"
             echo "scheme=roothide"
             echo "target=$TARGET"
@@ -124,7 +140,7 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: SplitWindow-v0.4.0-RootHide
+          name: SplitWindow-v0.4.1-RootHide
           path: |
             packages/*.deb
             packages/BUILD-VERIFICATION.txt

@@ -3,8 +3,10 @@
 #include <dlfcn.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static const CFStringRef SWPreferencesDomain = CFSTR("com.dream.splitwindow");
 static const CFStringRef SWActivationNotification = CFSTR("com.dream.splitwindow/activationRequested");
@@ -17,6 +19,23 @@ static SWFeatureFunction SWFeatureStartFunction = NULL;
 static SWFeatureFunction SWFeatureReloadFunction = NULL;
 
 static void SWLoaderInitialize(void);
+
+static void SWLoaderLog(const char *format, ...) {
+    if (!format) return;
+
+    mkdir("/var/mobile/SplitWindow", 0755);
+    mkdir("/var/mobile/SplitWindow/logs", 0755);
+
+    FILE *file = fopen("/var/mobile/SplitWindow/logs/loader.log", "a");
+    if (!file) return;
+
+    va_list args;
+    va_start(args, format);
+    vfprintf(file, format, args);
+    va_end(args);
+    fputc('\n', file);
+    fclose(file);
+}
 
 static bool SWPreferenceEnabled(void) {
     CFPreferencesAppSynchronize(SWPreferencesDomain);
@@ -54,17 +73,30 @@ static bool SWFeaturePath(char *buffer, size_t bufferSize) {
 }
 
 static bool SWLoadFeatureIfNeeded(void) {
-    if (SWFeatureHandle && SWFeatureStartFunction && SWFeatureReloadFunction) return true;
+    if (SWFeatureHandle && SWFeatureStartFunction && SWFeatureReloadFunction) {
+        SWLoaderLog("FEATURE already loaded");
+        return true;
+    }
 
     char path[8192];
-    if (!SWFeaturePath(path, sizeof(path))) return false;
+    if (!SWFeaturePath(path, sizeof(path))) {
+        SWLoaderLog("FEATURE path resolution failed");
+        return false;
+    }
+
+    SWLoaderLog("FEATURE path=%s", path);
 
     void *handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-    if (!handle) return false;
+    if (!handle) {
+        const char *error = dlerror();
+        SWLoaderLog("FEATURE dlopen failed: %s", error ? error : "unknown");
+        return false;
+    }
 
     SWFeatureFunction start = (SWFeatureFunction)dlsym(handle, "SWFeatureStart");
     SWFeatureFunction reload = (SWFeatureFunction)dlsym(handle, "SWFeatureReload");
     if (!start || !reload) {
+        SWLoaderLog("FEATURE missing entry points start=%p reload=%p", start, reload);
         dlclose(handle);
         return false;
     }
@@ -72,17 +104,24 @@ static bool SWLoadFeatureIfNeeded(void) {
     SWFeatureHandle = handle;
     SWFeatureStartFunction = start;
     SWFeatureReloadFunction = reload;
+    SWLoaderLog("FEATURE loaded successfully");
     return true;
 }
 
 static void SWHandleActivationOnMain(void *context) {
     (void)context;
-    if (!SWPreferenceEnabled()) {
+    bool enabled = SWPreferenceEnabled();
+    SWLoaderLog("ACTIVATION enabled=%d", enabled ? 1 : 0);
+    if (!enabled) {
         if (SWFeatureReloadFunction) SWFeatureReloadFunction();
         return;
     }
 
-    if (!SWLoadFeatureIfNeeded()) return;
+    if (!SWLoadFeatureIfNeeded()) {
+        SWLoaderLog("ACTIVATION feature load failed");
+        return;
+    }
+    SWLoaderLog("ACTIVATION invoking feature start");
     SWFeatureStartFunction();
 }
 

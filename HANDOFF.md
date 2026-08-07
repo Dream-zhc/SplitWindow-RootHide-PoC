@@ -820,3 +820,18 @@ c628526  first commit
 **先保证“装上不会把 SpringBoard 打黑”，再谈小窗功能。**
 
 这是这个项目当前不可跨越的优先级。
+
+---
+
+## 16. v0.4.1 设置页修复
+
+实机 v0.4.0 已确认：RootHide 安全加载通过，但 `设置 -> 越狱 -> SplitWindow` 进入后页面空白，且 PreferenceLoader 列表没有图标，因此用户无法手动启用 Feature。
+
+v0.4.1 已处理：
+
+- `SWRootListController` 不再依赖 `PSListController` / `Preferences.framework` 的 specifier 解析。
+- Root 设置页改成纯 UIKit `UITableViewController`，直接提供：`启用`、`显示悬浮按钮`、`选择小窗 App`。
+- `启用` 直接写 `EnabledV040` 并显式发送 `com.dream.splitwindow/activationRequested`。
+- PreferenceLoader 增加 `SplitWindow.png` 图标。
+- Pure-C Loader 在用户显式启用后写 `/var/mobile/SplitWindow/logs/loader.log`，记录 Feature 路径解析、`dlopen` 和入口函数状态；constructor 仍不做文件 I/O。
+- CI 新增 Preference Bundle / icon 验证，禁止再次产出“能安装但设置页是空壳”的包。

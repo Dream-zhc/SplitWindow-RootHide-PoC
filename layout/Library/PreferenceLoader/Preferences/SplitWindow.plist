@@ -9,6 +9,7 @@
         <key>detail</key><string>SWRootListController</string>
         <key>isController</key><true/>
         <key>label</key><string>SplitWindow</string>
+        <key>icon</key><string>SplitWindow.png</string>
     </dict>
 </dict>
 </plist>
