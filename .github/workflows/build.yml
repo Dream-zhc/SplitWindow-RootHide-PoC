@@ -95,6 +95,10 @@ jobs:
             echo "Unsafe loader dependency detected" >&2
             exit 1
           fi
+          if strings "$DYLIB" | grep -Eq 'SWOverlayController|FBSceneManager|_UISceneLayerHostContainerView|launchApplicationWithIdentifier'; then
+            echo "Feature/FrontBoard code leaked into the SpringBoard loader" >&2
+            exit 1
+          fi
           echo "--- Feature Mach-O ---"
           file "$FEATURE"
           FEATURE_SLICES="$(lipo -archs "$FEATURE")"
