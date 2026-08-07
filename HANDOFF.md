@@ -823,6 +823,39 @@ c628526  first commit
 
 ---
 
+## 16. v0.4.2 Preference Bundle 修复基线
+
+2026-08-08 实机确认 v0.4.1 点击 `设置 -> SplitWindow` 会导致 Settings 直接闪退。
+
+根因不是 PreferenceLoader 本身，而是项目的 Preference Bundle 结构偏离 Theos 的标准模板：
+
+- `Info.plist` 错误放在 `Prefs/Info.plist`，没有被复制进 `SplitWindowPrefs.bundle`。
+- bundle 缺少 `CFBundleExecutable` / `NSPrincipalClass` 可用元数据。
+- v0.4.1 又额外把根控制器改成自定义 `UITableViewController`，进一步偏离已验证的 PreferenceLoader 路线。
+
+v0.4.2 固定规则：
+
+```text
+Prefs/
+├── Makefile
+├── SWRootListController.h
+├── SWRootListController.m
+└── Resources/
+    ├── Info.plist
+    └── Root.plist
+```
+
+- `SWRootListController : PSListController`
+- 使用 `_specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self]`
+- `SplitWindowPrefs_PRIVATE_FRAMEWORKS = Preferences`
+- `Resources/Info.plist` 必须包含：
+  - `CFBundleExecutable = SplitWindowPrefs`
+  - `NSPrincipalClass = SWRootListController`
+- CI 必须解包并验证上述文件/字段，不能只验证 bundle 目录存在。
+- v0.4.2 暂时不编译 `SWAppListController` 到 Preference Bundle；第一轮固定 Calculator / Notes，先确认设置页和显式启用链稳定。
+
+---
+
 ## 16. v0.4.1 设置页修复
 
 实机 v0.4.0 已确认：RootHide 安全加载通过，但 `设置 -> 越狱 -> SplitWindow` 进入后页面空白，且 PreferenceLoader 列表没有图标，因此用户无法手动启用 Feature。

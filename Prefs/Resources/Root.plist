@@ -29,17 +29,7 @@
         </dict>
         <dict>
             <key>cell</key><string>PSGroupCell</string>
-            <key>label</key><string>App</string>
-        </dict>
-        <dict>
-            <key>cell</key><string>PSLinkCell</string>
-            <key>label</key><string>选择小窗 App</string>
-            <key>detail</key><string>SWAppListController</string>
-            <key>isController</key><true/>
-        </dict>
-        <dict>
-            <key>cell</key><string>PSGroupCell</string>
-            <key>footerText</key><string>隔离启动版：安装/Respring 时只加载最小 Loader，不加载 UIKit/FrontBoard 功能模块。只有手动开启后才加载小窗功能。日志：/var/mobile/SplitWindow/logs/splitwindow.log</string>
+            <key>footerText</key><string>当前安全验证阶段固定使用 Calculator / Notes。安装或 Respring 后保持待机，只有手动开启后才加载小窗功能模块。</string>
         </dict>
     </array>
 </dict>

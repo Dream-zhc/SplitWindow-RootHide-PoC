@@ -81,6 +81,16 @@ jobs:
           test -n "$PLIST"
           test -n "$PREFS"
           test -n "$FEATURE"
+
+          PREFS_INFO="$PREFS/Info.plist"
+          PREFS_ROOT="$PREFS/Root.plist"
+          PREFS_BIN="$PREFS/SplitWindowPrefs"
+          test -f "$PREFS_INFO"
+          test -f "$PREFS_ROOT"
+          test -f "$PREFS_BIN"
+          test "$(plutil -extract CFBundleExecutable raw -o - "$PREFS_INFO")" = "SplitWindowPrefs"
+          test "$(plutil -extract NSPrincipalClass raw -o - "$PREFS_INFO")" = "SWRootListController"
+          strings "$PREFS_BIN" | grep -q 'SWRootListController'
           test -n "$PREF_ENTRY"
           test -n "$PREF_ICON"
 
@@ -140,7 +150,7 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: SplitWindow-v0.4.1-RootHide
+          name: SplitWindow-v0.4.2-RootHide
           path: |
             packages/*.deb
             packages/BUILD-VERIFICATION.txt
