@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>title</key>
+    <string>SplitWindow</string>
+    <key>items</key>
+    <array>
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>SplitWindow PoC</string>
+            <key>footerText</key><string>iOS 16 + Dopamine RootHide 第一版验证。右侧边缘向内滑，或点击悬浮按钮打开 App 面板。</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>label</key><string>启用</string>
+            <key>defaults</key><string>com.dream.splitwindow</string>
+            <key>key</key><string>Enabled</string>
+            <key>default</key><false/>
+            <key>PostNotification</key><string>com.dream.splitwindow/preferencesChanged</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>label</key><string>显示悬浮按钮</string>
+            <key>defaults</key><string>com.dream.splitwindow</string>
+            <key>key</key><string>ShowFloatingButton</string>
+            <key>default</key><true/>
+            <key>PostNotification</key><string>com.dream.splitwindow/preferencesChanged</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>App</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSLinkCell</string>
+            <key>label</key><string>选择小窗 App</string>
+            <key>detail</key><string>SWAppListController</string>
+            <key>isController</key><true/>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>footerText</key><string>安全启动版：安装/重启后默认不创建任何 SpringBoard 窗口。手动开启后才加载悬浮入口。日志：/var/mobile/SplitWindow/logs/splitwindow.log</string>
+        </dict>
+    </array>
+</dict>
+</plist>
