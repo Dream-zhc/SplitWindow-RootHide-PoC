@@ -1,5 +1,10 @@
 # SplitWindow PoC — iOS 16 / Dopamine RootHide
 
+> v0.3.0 deliberately uses a standard **rootless** package on RootHide's
+> rootless compatibility layer. This matches the packaging path already proven
+> on the target device and removes native RootHide relocation/toolchain details
+> from the SpringBoard black-screen investigation.
+
 一个用于验证 **真实 App Scene 悬浮小窗** 的最小 Theos tweak 工程。
 
 ## 第一版范围
@@ -35,7 +40,8 @@ Actions -> `Build RootHide DEB` -> Run workflow。
 
 构建成功后下载 Artifact `SplitWindow-RootHide-DEB`，里面是 `.deb`。
 
-工作流使用 Ubuntu + RootHide Theos，不需要 Xcode/macOS。
+工作流使用 GitHub macOS runner + 固定版本 Theos。本地仍不需要安装 Xcode。
+上传 artifact 前会校验 deb architecture、Mach-O slices、动态库依赖和 tweak filter。
 
 ## 安装
 

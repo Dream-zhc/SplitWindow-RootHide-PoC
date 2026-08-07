@@ -23,13 +23,19 @@ static void SWPreferencesChanged(__unused CFNotificationCenterRef center,
 }
 
 %ctor {
-    @autoreleasepool {
-        SWFileLog(@"BOOT dylib loaded; passive start enabled (no automatic UIWindow creation)");
-    }
+    // Keep SpringBoard's injection path minimal: no synchronous file I/O,
+    // preferences reads, UIWindow creation, or FrontBoard work in the ctor.
+    NSLog(@"[SplitWindow] loader attached; passive mode");
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                     NULL,
                                     SWPreferencesChanged,
                                     (__bridge CFStringRef)SWPreferencesChangedNotification,
                                     NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    // Persist a breadcrumb only after SpringBoard has survived startup.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        SWFileLog(@"BOOT-OK SpringBoard survived 8s after SplitWindow injection; overlay still passive");
+    });
 }

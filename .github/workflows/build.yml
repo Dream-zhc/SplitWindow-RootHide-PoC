@@ -1,38 +1,88 @@
-name: Build RootHide DEB
+name: Build RootHide-Compatible DEB
 
 on:
   workflow_dispatch:
   push:
     branches: [ "main", "master" ]
 
+permissions:
+  contents: read
+
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: macos-26
+    timeout-minutes: 35
     env:
-      THEOS: /home/runner/theos
-      CI: "true"
-      THEOS_PACKAGE_SCHEME: roothide
+      THEOS: ${{ github.workspace }}/.theos
+      THEOS_REVISION: 16362d3aa83a0acd56df4493d575d34306d42478
+      THEOS_PACKAGE_SCHEME: rootless
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install RootHide Theos
-        shell: bash
+      - name: Install packaging dependencies
+        run: brew install dpkg ldid xz
+
+      - name: Install pinned Theos
         run: |
-          bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
+          git clone --filter=blob:none https://github.com/theos/theos.git "$THEOS"
+          git -C "$THEOS" checkout --detach "$THEOS_REVISION"
+          git -C "$THEOS" submodule update --init --recursive --depth 1
+          test "$(git -C "$THEOS" rev-parse HEAD)" = "$THEOS_REVISION"
 
       - name: Build package
-        shell: bash
         run: |
           make clean
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
-          echo "Built packages:"
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
           ls -lah packages/
+
+      - name: Verify package before publishing
+        run: |
+          set -euo pipefail
+          DEB="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$DEB"
+
+          ARCH="$(dpkg-deb -f "$DEB" Architecture)"
+          VERSION="$(dpkg-deb -f "$DEB" Version)"
+          echo "Package: $DEB"
+          echo "Version: $VERSION"
+          echo "Architecture: $ARCH"
+          test "$ARCH" = "iphoneos-arm64"
+
+          rm -rf verify-root
+          mkdir verify-root
+          dpkg-deb -x "$DEB" verify-root
+
+          DYLIB="$(find verify-root -type f -name 'SplitWindow.dylib' -print -quit)"
+          PLIST="$(find verify-root -type f -name 'SplitWindow.plist' -path '*DynamicLibraries*' -print -quit)"
+          PREFS="$(find verify-root -type d -name 'SplitWindowPrefs.bundle' -print -quit)"
+          test -n "$DYLIB"
+          test -n "$PLIST"
+          test -n "$PREFS"
+
+          echo "--- Mach-O ---"
+          file "$DYLIB"
+          lipo -archs "$DYLIB"
+          echo "--- Linked libraries ---"
+          otool -L "$DYLIB"
+          echo "--- Filter plist ---"
+          plutil -p "$PLIST"
+
+          {
+            echo "version=$VERSION"
+            echo "architecture=$ARCH"
+            echo "dylib=$DYLIB"
+            echo "slices=$(lipo -archs "$DYLIB")"
+            echo "theos=$THEOS_REVISION"
+            echo "scheme=rootless-on-roothide"
+          } > packages/BUILD-VERIFICATION.txt
 
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: SplitWindow-RootHide-DEB
-          path: packages/*.deb
+          name: SplitWindow-v0.3.0-RootHide-Compatible
+          path: |
+            packages/*.deb
+            packages/BUILD-VERIFICATION.txt
           if-no-files-found: error

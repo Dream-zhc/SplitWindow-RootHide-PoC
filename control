@@ -1,8 +1,8 @@
 Package: com.dream.splitwindow
 Name: SplitWindow PoC
-Version: 0.2.0
-Architecture: iphoneos-arm
-Description: iOS 16 RootHide proof-of-concept for hosting one interactive app scene in a floating window above the current app.
+Version: 0.3.0
+Architecture: iphoneos-arm64
+Description: iOS 16 SplitWindow proof-of-concept built as a rootless package for RootHide compatibility.
 Maintainer: Dream
 Author: Dream
 Section: Tweaks
