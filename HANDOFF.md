@@ -1,3 +1,13 @@
+### 0.4.2 CI correction: Preferences.framework is required
+
+`SplitWindowPrefs.bundle` is a standard `PSListController` PreferenceLoader bundle. Its binary **must** link:
+
+```text
+/System/Library/PrivateFrameworks/Preferences.framework/Preferences
+```
+
+Do not treat that dependency as unsafe. The strict "no UIKit/Foundation/Preferences" rule applies only to the automatically injected SpringBoard loader `SplitWindow.dylib`, not to the Settings preference bundle.
+
 # SplitWindow-RootHide 项目交接文档
 
 > 面向一个**完全没有上下文的新会话**。请先完整读完本文，再动代码。

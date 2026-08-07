@@ -124,8 +124,8 @@ jobs:
           PREFS_BIN="$PREFS/SplitWindowPrefs"
           test -f "$PREFS_BIN"
           otool -L "$PREFS_BIN"
-          if otool -L "$PREFS_BIN" | grep -q '/PrivateFrameworks/Preferences.framework/'; then
-            echo "Preferences bundle unexpectedly depends on Preferences.framework" >&2
+          if ! otool -L "$PREFS_BIN" | grep -q '/PrivateFrameworks/Preferences.framework/Preferences'; then
+            echo "Preferences bundle is missing required Preferences.framework dependency" >&2
             exit 1
           fi
           strings "$PREFS_BIN" | grep -q 'SWRootListController'
