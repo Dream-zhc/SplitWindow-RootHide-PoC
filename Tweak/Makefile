@@ -6,8 +6,8 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = SplitWindow
 
-SplitWindow_FILES = Tweak.xm SWLogger.m SWPreferences.m SWSceneHost.m SWOverlayController.m
-SplitWindow_FRAMEWORKS = Foundation UIKit QuartzCore
-SplitWindow_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unguarded-availability-new -Wno-arc-performSelector-leaks
+SplitWindow_FILES = Loader.m
+SplitWindow_FRAMEWORKS = CoreFoundation
+SplitWindow_CFLAGS = -fobjc-arc
 
 include $(THEOS_MAKE_PATH)/tweak.mk

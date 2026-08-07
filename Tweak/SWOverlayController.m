@@ -33,32 +33,28 @@
 
 - (UIWindowScene *)springBoardWindowScene {
     if (@available(iOS 13.0, *)) {
-        UIWindowScene *fallback = nil;
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             UIWindowScene *windowScene = (UIWindowScene *)scene;
-            if (!fallback) fallback = windowScene;
             if (scene.activationState == UISceneActivationStateForegroundActive ||
                 scene.activationState == UISceneActivationStateForegroundInactive) {
                 return windowScene;
             }
         }
-        return fallback;
     }
     return nil;
 }
 
 - (UIWindow *)windowWithFrame:(CGRect)frame level:(CGFloat)level {
     SWFileLog(@"UI-1 create window requested frame=%@ level=%.1f", NSStringFromCGRect(frame), level);
-    UIWindow *window = nil;
     UIWindowScene *scene = [self springBoardWindowScene];
-    SWFileLog(@"UI-2 selected SpringBoard UIWindowScene=%@ state=%ld", scene, (long)scene.activationState);
-    if (scene && [UIWindow instancesRespondToSelector:@selector(initWithWindowScene:)]) {
-        window = [[UIWindow alloc] initWithWindowScene:scene];
-        window.frame = frame;
-    } else {
-        window = [[UIWindow alloc] initWithFrame:frame];
+    if (!scene || ![UIWindow instancesRespondToSelector:@selector(initWithWindowScene:)]) {
+        SWFileLog(@"UI-2 refused window creation: no foreground SpringBoard UIWindowScene");
+        return nil;
     }
+    SWFileLog(@"UI-2 selected SpringBoard UIWindowScene=%@ state=%ld", scene, (long)scene.activationState);
+    UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
+    window.frame = frame;
     window.windowLevel = level;
     window.backgroundColor = UIColor.clearColor;
     UIViewController *root = [UIViewController new];
@@ -70,12 +66,25 @@
 - (void)start {
     if (self.started) return;
     SWFileLog(@"START-1 explicit overlay start begin");
-    self.started = YES;
     self.sceneHost = [SWSceneHost new];
     SWFileLog(@"START-2 building edge window");
     [self buildEdgeWindow];
+    if (!self.edgeWindow) {
+        SWFileLog(@"START-FAIL no safe foreground UIWindowScene for edge window");
+        self.sceneHost = nil;
+        return;
+    }
     SWFileLog(@"START-3 building floating window");
     [self buildFloatingWindow];
+    if (!self.floatingWindow) {
+        SWFileLog(@"START-FAIL no safe foreground UIWindowScene for floating window");
+        self.edgeWindow.hidden = YES;
+        self.edgeWindow.rootViewController = nil;
+        self.edgeWindow = nil;
+        self.sceneHost = nil;
+        return;
+    }
+    self.started = YES;
     SWFileLog(@"START-4 reloading preferences");
     [self reloadPreferences];
     SWFileLog(@"START-5 overlay controller started");
@@ -206,6 +215,10 @@
 
     if (!self.panelWindow) {
         self.panelWindow = [self windowWithFrame:frame level:UIWindowLevelAlert + 90.0];
+        if (!self.panelWindow) {
+            SWFileLog(@"UI panel creation refused: no safe UIWindowScene");
+            return;
+        }
     } else {
         self.panelWindow.frame = frame;
     }
@@ -277,6 +290,11 @@
     CGFloat y = floor(MAX(40.0, (CGRectGetHeight(screen) - totalHeight) / 2.0));
 
     self.hostWindow = [self windowWithFrame:CGRectMake(x, y, contentWidth, totalHeight) level:UIWindowLevelAlert + 80.0];
+    if (!self.hostWindow) {
+        SWFileLog(@"HOST-5 refused host window: no safe UIWindowScene");
+        [self.sceneHost close];
+        return;
+    }
     UIView *root = self.hostWindow.rootViewController.view;
     root.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.98];
     root.layer.cornerRadius = 18.0;
@@ -318,7 +336,6 @@
     [self.sceneClipView addSubview:hostedView];
 
     self.hostWindow.hidden = NO;
-    [self.hostWindow makeKeyAndVisible];
     SWFileLog(@"HOST-5 window presented %@ frame=%@", bundleIdentifier, NSStringFromCGRect(self.hostWindow.frame));
 }
 
@@ -350,6 +367,7 @@
 - (void)showFailureBubble:(NSString *)message {
     CGRect screen = UIScreen.mainScreen.bounds;
     UIWindow *window = [self windowWithFrame:CGRectMake(24, 80, CGRectGetWidth(screen) - 48, 58) level:UIWindowLevelAlert + 120.0];
+    if (!window) return;
     UILabel *label = [[UILabel alloc] initWithFrame:CGRectInset(window.bounds, 12, 8)];
     label.text = message;
     label.textColor = UIColor.whiteColor;

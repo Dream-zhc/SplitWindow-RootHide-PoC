@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-26
+    runs-on: macos-14
     timeout-minutes: 35
     env:
       THEOS: ${{ github.workspace }}/.theos
@@ -34,12 +34,12 @@ jobs:
 
       - name: Install patched iOS 16.5 SDK
         run: |
-          rm -rf "$RUNNER_TEMP/theos-sdks"
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
-          git -C "$RUNNER_TEMP/theos-sdks" sparse-checkout set iPhoneOS16.5.sdk
           mkdir -p "$THEOS/sdks"
           rm -rf "$THEOS/sdks/iPhoneOS16.5.sdk"
-          cp -a "$RUNNER_TEMP/theos-sdks/iPhoneOS16.5.sdk" "$THEOS/sdks/"
+          curl -fL --retry 3 --retry-delay 2 \
+            https://github.com/theos/sdks/releases/latest/download/iPhoneOS16.5.sdk.tar.xz \
+            -o "$RUNNER_TEMP/iPhoneOS16.5.sdk.tar.xz"
+          tar -xJf "$RUNNER_TEMP/iPhoneOS16.5.sdk.tar.xz" -C "$THEOS/sdks"
           test -f "$THEOS/sdks/iPhoneOS16.5.sdk/System/Library/PrivateFrameworks/Preferences.framework/Preferences.tbd"
           echo "Using patched SDK: $THEOS/sdks/iPhoneOS16.5.sdk"
 
@@ -73,11 +73,13 @@ jobs:
           DYLIB="$(find verify-root -type f -name 'SplitWindow.dylib' -print -quit)"
           PLIST="$(find verify-root -type f -name 'SplitWindow.plist' -path '*DynamicLibraries*' -print -quit)"
           PREFS="$(find verify-root -type d -name 'SplitWindowPrefs.bundle' -print -quit)"
+          FEATURE="$(find verify-root -type f -name 'SplitWindowFeature.dylib' -print -quit)"
           test -n "$DYLIB"
           test -n "$PLIST"
           test -n "$PREFS"
+          test -n "$FEATURE"
 
-          echo "--- Mach-O ---"
+          echo "--- Loader Mach-O ---"
           file "$DYLIB"
           SLICES="$(lipo -archs "$DYLIB")"
           echo "$SLICES"
@@ -87,8 +89,18 @@ jobs:
             echo "Unexpected 32-bit slice: $SLICES" >&2
             exit 1
           fi
-          echo "--- Linked libraries ---"
+          echo "--- Loader linked libraries ---"
           otool -L "$DYLIB"
+          if otool -L "$DYLIB" | grep -Eq '/UIKit\\.framework/|/QuartzCore\\.framework/|/FrontBoard'; then
+            echo "Unsafe loader dependency detected" >&2
+            exit 1
+          fi
+          echo "--- Feature Mach-O ---"
+          file "$FEATURE"
+          FEATURE_SLICES="$(lipo -archs "$FEATURE")"
+          echo "$FEATURE_SLICES"
+          echo "$FEATURE_SLICES" | grep -qw arm64
+          echo "$FEATURE_SLICES" | grep -qw arm64e
           echo "--- Filter plist ---"
           plutil -p "$PLIST"
 
@@ -97,6 +109,8 @@ jobs:
             echo "architecture=$ARCH"
             echo "dylib=$DYLIB"
             echo "slices=$SLICES"
+            echo "feature=$FEATURE"
+            echo "feature_slices=$FEATURE_SLICES"
             echo "theos=$(git -C "$THEOS" rev-parse HEAD)"
             echo "scheme=roothide"
             echo "target=$TARGET"
@@ -105,7 +119,7 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: SplitWindow-v0.3.1-RootHide
+          name: SplitWindow-v0.4.0-RootHide
           path: |
             packages/*.deb
             packages/BUILD-VERIFICATION.txt

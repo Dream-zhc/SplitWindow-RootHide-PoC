@@ -12,7 +12,9 @@ NSString * const SWPreferencesDomain = @"com.dream.splitwindow";
 }
 
 + (BOOL)enabled {
-    id value = [self copyPreferenceForKey:@"Enabled"];
+    // Do not inherit the legacy Enabled value. A previous crashing build may
+    // have left it set to true even after the package was removed.
+    id value = [self copyPreferenceForKey:@"EnabledV040"];
     // Fail closed. The tweak must never create SpringBoard windows merely because
     // it was installed or because SpringBoard restarted after a crash.
     return value == nil ? NO : [value boolValue];

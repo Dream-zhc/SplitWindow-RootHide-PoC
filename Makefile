@@ -5,6 +5,6 @@ export DEB_ARCH = iphoneos-arm64
 
 include $(THEOS)/makefiles/common.mk
 
-SUBPROJECTS += Tweak Prefs
+SUBPROJECTS += Feature Tweak Prefs
 
 include $(THEOS_MAKE_PATH)/aggregate.mk
