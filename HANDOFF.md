@@ -5,8 +5,39 @@
 > 当前目标设备环境：**iOS 16.0 + Dopamine RootHide（隐根）**。
 > 当前仓库：`Dream-zhc/SplitWindow-RootHide-PoC`
 > 当前分支：`main`
-> 当前 HEAD：`6f5c8fb8bd4d973f2a96a9393e748f4931ae997b`
-> 当前本地与 `origin/main`：已同步（ahead 0 / behind 0）。
+> 当前代码基线：**v0.4.0 emergency isolation series**；以 `git log` 最新 HEAD 为准。
+> `6f5c8fb` 仅保留为历史参考，**禁止回退为单 dylib 自动注入完整 UI/FrontBoard 功能代码的结构**。
+
+## 0. 2026-08-07 紧急修复：安装即 SpringBoard 死机
+
+用户反复确认：此前包安装/Respring 后会导致 SpringBoard 黑屏/死机，必须卸载 tweak 才恢复。
+
+因此 v0.4.0 不再依赖“完整 dylib 已加载，但 ctor 不主动 start”这种软隔离，而改成**物理模块隔离**：
+
+1. `SplitWindow.dylib` 是自动注入 SpringBoard 的最小 Loader。
+   - 已改为纯 C (`Tweak/Loader.c`)。
+   - 自动加载阶段只依赖 CoreFoundation + libSystem。
+   - 不包含 Foundation/libobjc/UIKit/QuartzCore/FrontBoard/Overlay/SceneHost 代码。
+   - ctor 只注册 Darwin notification，不读设置、不写日志、不建 UIWindow、不碰 FBScene、不 dlopen Feature。
+2. `SplitWindowFeature.dylib` 才包含 UIKit / `SWOverlayController` / `SWSceneHost`。
+   - 安装到 `/Library/SplitWindow`，不位于 tweak 自动扫描目录。
+   - 只有用户在设置里**显式开启**后，Loader 才会 `dlopen` Feature。
+   - SpringBoard 如果因 Feature 崩溃并重启，Loader 不会因为已有 Enabled 值而自动重新加载 Feature，因此不会形成无限黑屏循环。
+3. 启用键从旧 `Enabled` 改为 `EnabledV040`。
+   - 卸载 tweak 不一定清除旧 preferences。
+   - 旧版本遗留的 `Enabled=true` 必须被 v0.4.0 完全忽略，避免安装后意外自动激活。
+4. UIWindow 创建改为 fail-closed。
+   - 只接受 foreground active/inactive 的 `UIWindowScene`。
+   - 不再随便取 fallback scene。
+   - 不再 fallback 到 `initWithFrame:`。
+   - host window 不再调用 `makeKeyAndVisible` 抢 SpringBoard key window。
+5. CI 增加强制门禁。
+   - Loader 必须 `arm64 + arm64e`。
+   - Loader 动态依赖中出现 Foundation/libobjc/UIKit/QuartzCore/FrontBoard 直接失败。
+   - Loader 字符串中出现 `SWOverlayController` / `FBSceneManager` / Scene host selectors 直接失败。
+   - Feature dylib 必须单独存在并包含 `arm64 + arm64e`。
+
+本地已用现有 Theos + patched iPhoneOS16.5 SDK 做 rootless **源码/链接 sanity build**，Feature、Loader、Prefs 均成功完成 arm64/arm64e 编译和打包；该本地 rootless deb 只用于编译验证，**不得作为最终 RootHide 实机测试包交付**。最终仍必须由 `roothide/theos` + `THEOS_PACKAGE_SCHEME=roothide` 构建并通过 CI 门禁后再给用户安装。
 
 ---
 
