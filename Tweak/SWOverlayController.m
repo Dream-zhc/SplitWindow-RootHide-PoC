@@ -4,6 +4,7 @@
 #import "SWLogger.h"
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
+#import <math.h>
 
 @interface SWAppButton : UIButton
 @property (nonatomic, copy) NSString *bundleIdentifier;
@@ -16,11 +17,20 @@
 @property (nonatomic, strong) UIWindow *edgeWindow;
 @property (nonatomic, strong) UIWindow *floatingWindow;
 @property (nonatomic, strong) UIWindow *panelWindow;
+@property (nonatomic, strong) UIWindow *backdropWindow;
 @property (nonatomic, strong) UIWindow *hostWindow;
+@property (nonatomic, strong) UIView *titleBar;
 @property (nonatomic, strong) UIView *sceneClipView;
+@property (nonatomic, strong) UIView *hostedView;
+@property (nonatomic, strong) UIView *resizeHandle;
+@property (nonatomic, strong) UIActivityIndicatorView *loadingIndicator;
 @property (nonatomic, strong) SWSceneHost *sceneHost;
 @property (nonatomic, strong) UILabel *hostTitleLabel;
 @property (nonatomic, strong) UIImageView *hostIconView;
+@property (nonatomic, strong) NSCache<NSString *, UIImage *> *iconCache;
+@property (nonatomic, copy) NSString *panelSignature;
+@property (nonatomic) CGFloat hostScale;
+@property (nonatomic) CGPoint hostNormalizedCenter;
 @end
 
 @implementation SWOverlayController
@@ -46,6 +56,62 @@
     return nil;
 }
 
+- (CGRect)activeScreenBounds {
+    UIWindowScene *scene = [self springBoardWindowScene];
+    if (@available(iOS 13.0, *)) {
+        if (scene && scene.coordinateSpace) return scene.coordinateSpace.bounds;
+    }
+    return UIScreen.mainScreen.bounds;
+}
+
+- (UIInterfaceOrientation)activeInterfaceOrientation {
+    UIWindowScene *scene = [self springBoardWindowScene];
+    if (@available(iOS 13.0, *)) {
+        if (scene) return scene.interfaceOrientation;
+    }
+    return UIInterfaceOrientationPortrait;
+}
+
+- (void)deviceOrientationDidChange:(__unused NSNotification *)notification {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self layoutOverlayWindowsForCurrentOrientation];
+    });
+}
+
+- (void)layoutOverlayWindowsForCurrentOrientation {
+    CGRect screen = [self activeScreenBounds];
+    if (self.edgeWindow) {
+        self.edgeWindow.frame = CGRectMake(CGRectGetWidth(screen) - 14.0, 0, 14.0, CGRectGetHeight(screen));
+        UIView *edge = self.edgeWindow.rootViewController.view;
+        UIView *handle = edge.subviews.firstObject;
+        if (handle) {
+            handle.frame = CGRectMake(8.0,
+                                      floor((CGRectGetHeight(screen) - 64.0) * 0.42),
+                                      4.0,
+                                      64.0);
+        }
+    }
+
+    if (self.floatingWindow) {
+        CGFloat size = 46.0;
+        self.floatingWindow.frame = CGRectMake(CGRectGetWidth(screen) - size - 10.0,
+                                               MAX(30.0, CGRectGetHeight(screen) * 0.42),
+                                               size,
+                                               size);
+    }
+
+    if (self.backdropWindow && !self.backdropWindow.hidden) self.backdropWindow.frame = screen;
+    self.panelSignature = nil;
+    if (self.panelWindow && !self.panelWindow.hidden) [self rebuildPanel];
+    if (self.hostWindow && !self.hostWindow.hidden) {
+        [self layoutHostWindowAnimated:NO];
+        [self.sceneHost updateSceneForHostBounds:screen interfaceOrientation:[self activeInterfaceOrientation]];
+    }
+    SWFileLog(@"UI rotation layout orientation=%ld bounds=%@",
+              (long)[self activeInterfaceOrientation],
+              NSStringFromCGRect(screen));
+}
+
 - (UIWindow *)windowWithFrame:(CGRect)frame level:(CGFloat)level {
     SWFileLog(@"UI-1 create window requested frame=%@ level=%.1f", NSStringFromCGRect(frame), level);
     UIWindowScene *scene = [self springBoardWindowScene];
@@ -68,6 +134,19 @@
     if (self.started) return;
     SWFileLog(@"START-1 explicit overlay start begin");
     self.sceneHost = [SWSceneHost new];
+    self.iconCache = [NSCache new];
+    self.iconCache.countLimit = 64;
+    self.hostScale = (CGFloat)[SWPreferences windowScale];
+    self.hostNormalizedCenter = CGPointMake(0.5, 0.5);
+    [UIDevice.currentDevice beginGeneratingDeviceOrientationNotifications];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(deviceOrientationDidChange:)
+                                               name:UIDeviceOrientationDidChangeNotification
+                                             object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self
+                                           selector:@selector(deviceOrientationDidChange:)
+                                               name:UIApplicationDidChangeStatusBarOrientationNotification
+                                             object:nil];
     SWFileLog(@"START-2 building edge window");
     [self buildEdgeWindow];
     if (!self.edgeWindow) {
@@ -93,7 +172,7 @@
 }
 
 - (void)buildEdgeWindow {
-    CGRect screen = UIScreen.mainScreen.bounds;
+    CGRect screen = [self activeScreenBounds];
     self.edgeWindow = [self windowWithFrame:CGRectMake(CGRectGetWidth(screen) - 14.0, 0, 14.0, CGRectGetHeight(screen)) level:UIWindowLevelAlert + 70.0];
 
     UIView *edge = self.edgeWindow.rootViewController.view;
@@ -114,7 +193,7 @@
 }
 
 - (void)buildFloatingWindow {
-    CGRect screen = UIScreen.mainScreen.bounds;
+    CGRect screen = [self activeScreenBounds];
     CGFloat size = 46.0;
     self.floatingWindow = [self windowWithFrame:CGRectMake(CGRectGetWidth(screen) - size - 10.0,
                                                            CGRectGetHeight(screen) * 0.42,
@@ -145,6 +224,8 @@
 - (void)reloadPreferences {
     if (!self.started) return;
     BOOL enabled = [SWPreferences enabled];
+    self.panelSignature = nil;
+    if (self.backdropWindow) [self configureBackdropGesture];
     self.edgeWindow.hidden = !enabled;
     self.floatingWindow.hidden = !(enabled && [SWPreferences showFloatingButton]);
     if (!enabled) {
@@ -170,7 +251,7 @@
         CGRect frame = window.frame;
         frame.origin.x += translation.x;
         frame.origin.y += translation.y;
-        CGRect screen = UIScreen.mainScreen.bounds;
+        CGRect screen = [self activeScreenBounds];
         frame.origin.x = MAX(4.0, MIN(frame.origin.x, CGRectGetWidth(screen) - CGRectGetWidth(frame) - 4.0));
         frame.origin.y = MAX(30.0, MIN(frame.origin.y, CGRectGetHeight(screen) - CGRectGetHeight(frame) - 30.0));
         window.frame = frame;
@@ -207,6 +288,8 @@
 
 - (UIImage *)iconForBundleIdentifier:(NSString *)bundleIdentifier {
     if (bundleIdentifier.length == 0) return nil;
+    UIImage *cached = [self.iconCache objectForKey:bundleIdentifier];
+    if (cached) return cached;
     SEL selector = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
     if ([UIImage respondsToSelector:selector]) {
         UIImage *image = ((id (*)(id, SEL, id, NSInteger, CGFloat))objc_msgSend)(UIImage.class,
@@ -220,7 +303,9 @@
             [image drawInRect:(CGRect){CGPointZero, size}];
             UIImage *scaled = UIGraphicsGetImageFromCurrentImageContext();
             UIGraphicsEndImageContext();
-            return [scaled imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+            UIImage *result = [scaled imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+            if (result) [self.iconCache setObject:result forKey:bundleIdentifier];
+            return result;
         }
     }
     if (@available(iOS 13.0, *)) return [UIImage systemImageNamed:@"app.fill"];
@@ -239,7 +324,7 @@
 
 - (void)rebuildPanel {
     NSArray<NSString *> *apps = [SWPreferences selectedBundleIdentifiers];
-    CGRect screen = UIScreen.mainScreen.bounds;
+    CGRect screen = [self activeScreenBounds];
     const NSInteger columns = 3;
     const CGFloat cellSize = 52.0;
     const CGFloat padding = 12.0;
@@ -250,6 +335,16 @@
     CGRect frame = CGRectMake(CGRectGetWidth(screen) - width - 12.0,
                               (CGRectGetHeight(screen) - height) / 2.0,
                               width, height);
+    NSString *signature = [NSString stringWithFormat:@"%@|%.0fx%.0f",
+                           [apps componentsJoinedByString:@"|"],
+                           CGRectGetWidth(screen),
+                           CGRectGetHeight(screen)];
+
+    if (self.panelWindow && [self.panelSignature isEqualToString:signature]) {
+        self.panelWindow.frame = frame;
+        return;
+    }
+    self.panelSignature = signature;
 
     if (!self.panelWindow) {
         self.panelWindow = [self windowWithFrame:frame level:UIWindowLevelAlert + 90.0];
@@ -313,8 +408,12 @@
 }
 
 - (void)openBundleIdentifier:(NSString *)bundleIdentifier {
-    [self closeHostWindow];
     SWFileLog(@"OPEN request %@", bundleIdentifier);
+    [self prepareHostWindowForBundleIdentifier:bundleIdentifier];
+    if (!self.hostWindow) {
+        [self showFailureBubble:@"Could not create the SplitWindow host window."];
+        return;
+    }
 
     __weak typeof(self) weakSelf = self;
     [self.sceneHost openBundleIdentifier:bundleIdentifier completion:^(UIView *hostedView, NSError *error) {
@@ -322,83 +421,190 @@
         if (!self) return;
         if (error || !hostedView) {
             SWFileLog(@"OPEN failed %@ error=%@", bundleIdentifier, error);
+            [self dismissHostWindowPreservingScene:NO];
             [self showFailureBubble:error.localizedDescription ?: @"Scene host failed"];
             return;
         }
-        [self presentHostedView:hostedView bundleIdentifier:bundleIdentifier];
+        [self attachHostedView:hostedView bundleIdentifier:bundleIdentifier];
     }];
 }
 
-- (void)presentHostedView:(UIView *)hostedView bundleIdentifier:(NSString *)bundleIdentifier {
-    CGRect screen = UIScreen.mainScreen.bounds;
-    CGFloat scale = 0.72;
-    CGFloat titleHeight = 36.0;
-    CGFloat contentWidth = floor(CGRectGetWidth(screen) * scale);
-    CGFloat contentHeight = floor(CGRectGetHeight(screen) * scale);
-    CGFloat totalHeight = contentHeight + titleHeight;
-    CGFloat x = floor((CGRectGetWidth(screen) - contentWidth) / 2.0);
-    CGFloat y = floor(MAX(40.0, (CGRectGetHeight(screen) - totalHeight) / 2.0));
+- (CGFloat)hostTitleHeight {
+    return 34.0;
+}
 
-    self.hostWindow = [self windowWithFrame:CGRectMake(x, y, contentWidth, totalHeight) level:UIWindowLevelAlert + 80.0];
-    if (!self.hostWindow) {
-        SWFileLog(@"HOST-5 refused host window: no safe UIWindowScene");
-        [self.sceneHost close];
-        return;
+- (CGFloat)clampedHostScale:(CGFloat)scale {
+    CGRect screen = [self activeScreenBounds];
+    CGFloat titleHeight = [self hostTitleHeight];
+    CGFloat maxWidthScale = (CGRectGetWidth(screen) - 16.0) / MAX(1.0, CGRectGetWidth(screen));
+    CGFloat maxHeightScale = (CGRectGetHeight(screen) - titleHeight - 24.0) / MAX(1.0, CGRectGetHeight(screen));
+    CGFloat maximum = MIN(0.95, MIN(maxWidthScale, maxHeightScale));
+    maximum = MAX(0.52, maximum);
+    return MAX(0.42, MIN(scale, maximum));
+}
+
+- (CGRect)hostFrameForCurrentScale {
+    CGRect screen = [self activeScreenBounds];
+    self.hostScale = [self clampedHostScale:self.hostScale];
+    CGFloat titleHeight = [self hostTitleHeight];
+    CGFloat width = floor(CGRectGetWidth(screen) * self.hostScale);
+    CGFloat contentHeight = floor(CGRectGetHeight(screen) * self.hostScale);
+    CGFloat height = contentHeight + titleHeight;
+
+    CGPoint normalized = self.hostNormalizedCenter;
+    if (normalized.x <= 0 || normalized.x >= 1 || normalized.y <= 0 || normalized.y >= 1) {
+        normalized = CGPointMake(0.5, 0.5);
     }
-    UIView *root = self.hostWindow.rootViewController.view;
-    root.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.98];
-    root.layer.cornerRadius = 18.0;
-    root.clipsToBounds = YES;
-    root.layer.borderWidth = 0.5;
-    root.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+    CGFloat centerX = CGRectGetMinX(screen) + CGRectGetWidth(screen) * normalized.x;
+    CGFloat centerY = CGRectGetMinY(screen) + CGRectGetHeight(screen) * normalized.y;
+    CGFloat x = centerX - width * 0.5;
+    CGFloat y = centerY - height * 0.5;
+    x = MAX(CGRectGetMinX(screen) + 4.0, MIN(x, CGRectGetMaxX(screen) - width - 4.0));
+    y = MAX(CGRectGetMinY(screen) + 18.0, MIN(y, CGRectGetMaxY(screen) - height - 8.0));
+    return CGRectMake(floor(x), floor(y), width, height);
+}
 
-    UIView *titleBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, contentWidth, titleHeight)];
-    titleBar.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1.0];
-    [root addSubview:titleBar];
+- (void)configureBackdropGesture {
+    if (!self.backdropWindow) return;
+    UIView *root = self.backdropWindow.rootViewController.view;
+    for (UIGestureRecognizer *recognizer in root.gestureRecognizers.copy) [root removeGestureRecognizer:recognizer];
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(backdropTapped:)];
+    tap.numberOfTapsRequired = [SWPreferences dismissRequiresDoubleTap] ? 2 : 1;
+    tap.cancelsTouchesInView = YES;
+    [root addGestureRecognizer:tap];
+}
 
-    self.hostTitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, contentWidth - 58, titleHeight)];
-    UIImage *icon = [self iconForBundleIdentifier:bundleIdentifier];
-    CGFloat titleX = 14.0;
-    if (icon) {
-        self.hostIconView = [[UIImageView alloc] initWithImage:icon];
-        self.hostIconView.frame = CGRectMake(10, 7, 22, 22);
+- (void)ensureBackdropWindow {
+    CGRect screen = [self activeScreenBounds];
+    if (!self.backdropWindow) {
+        self.backdropWindow = [self windowWithFrame:screen level:UIWindowLevelAlert + 79.0];
+        self.backdropWindow.rootViewController.view.backgroundColor = UIColor.clearColor;
+    } else {
+        self.backdropWindow.frame = screen;
+    }
+    [self configureBackdropGesture];
+}
+
+- (void)prepareHostWindowForBundleIdentifier:(NSString *)bundleIdentifier {
+    [self ensureBackdropWindow];
+    CGRect initialFrame = [self hostFrameForCurrentScale];
+    if (!self.hostWindow) {
+        self.hostWindow = [self windowWithFrame:initialFrame level:UIWindowLevelAlert + 80.0];
+        if (!self.hostWindow) {
+            SWFileLog(@"HOST refused host window: no safe UIWindowScene");
+            return;
+        }
+
+        UIView *root = self.hostWindow.rootViewController.view;
+        root.backgroundColor = [UIColor colorWithWhite:0.035 alpha:0.985];
+        root.layer.cornerRadius = 18.0;
+        root.clipsToBounds = YES;
+        root.layer.borderWidth = 0.5;
+        root.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+
+        self.titleBar = [UIView new];
+        self.titleBar.backgroundColor = [UIColor colorWithWhite:0.07 alpha:0.98];
+        [root addSubview:self.titleBar];
+        UIPanGestureRecognizer *drag = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragHostWindow:)];
+        [self.titleBar addGestureRecognizer:drag];
+
+        self.hostIconView = [UIImageView new];
         self.hostIconView.contentMode = UIViewContentModeScaleAspectFit;
         self.hostIconView.layer.cornerRadius = 5.0;
         self.hostIconView.layer.masksToBounds = YES;
-        [titleBar addSubview:self.hostIconView];
-        titleX = 39.0;
+        [self.titleBar addSubview:self.hostIconView];
+
+        self.hostTitleLabel = [UILabel new];
+        self.hostTitleLabel.textColor = UIColor.whiteColor;
+        self.hostTitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        [self.titleBar addSubview:self.hostTitleLabel];
+
+        self.sceneClipView = [UIView new];
+        self.sceneClipView.backgroundColor = [UIColor colorWithWhite:0.02 alpha:1.0];
+        self.sceneClipView.clipsToBounds = YES;
+        [root addSubview:self.sceneClipView];
+
+        self.loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+        self.loadingIndicator.hidesWhenStopped = YES;
+        [self.sceneClipView addSubview:self.loadingIndicator];
+
+        self.resizeHandle = [UIView new];
+        self.resizeHandle.backgroundColor = UIColor.clearColor;
+        UIImageView *resizeIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.up.left.and.arrow.down.right"]];
+        resizeIcon.tag = 991;
+        resizeIcon.tintColor = [UIColor colorWithWhite:1 alpha:0.62];
+        resizeIcon.contentMode = UIViewContentModeScaleAspectFit;
+        [self.resizeHandle addSubview:resizeIcon];
+        UIPanGestureRecognizer *resize = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(resizeHostWindow:)];
+        [self.resizeHandle addGestureRecognizer:resize];
+        [root addSubview:self.resizeHandle];
     }
-    self.hostTitleLabel.frame = CGRectMake(titleX, 0, contentWidth - titleX - 44, titleHeight);
+
+    [self.hostedView removeFromSuperview];
+    self.hostedView = nil;
+    self.hostIconView.image = [self iconForBundleIdentifier:bundleIdentifier];
     self.hostTitleLabel.text = [self displayNameForBundleIdentifier:bundleIdentifier];
-    self.hostTitleLabel.textColor = UIColor.whiteColor;
-    self.hostTitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    [titleBar addSubview:self.hostTitleLabel];
+    [self.loadingIndicator startAnimating];
+    [self layoutHostWindowAnimated:NO];
+    self.backdropWindow.hidden = NO;
+    self.hostWindow.hidden = NO;
+    SWFileLog(@"HOST shell presented %@ frame=%@ scale=%.2f", bundleIdentifier, NSStringFromCGRect(self.hostWindow.frame), self.hostScale);
+}
 
-    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
-    close.frame = CGRectMake(contentWidth - 42, 0, 42, titleHeight);
-    close.tintColor = UIColor.whiteColor;
-    if (@available(iOS 13.0, *)) [close setImage:[UIImage systemImageNamed:@"xmark"] forState:UIControlStateNormal];
-    else [close setTitle:@"×" forState:UIControlStateNormal];
-    [close addTarget:self action:@selector(closeHostWindow) forControlEvents:UIControlEventTouchUpInside];
-    [titleBar addSubview:close];
-
-    UIPanGestureRecognizer *drag = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragHostWindow:)];
-    [titleBar addGestureRecognizer:drag];
-
-    self.sceneClipView = [[UIView alloc] initWithFrame:CGRectMake(0, titleHeight, contentWidth, contentHeight)];
-    self.sceneClipView.backgroundColor = UIColor.blackColor;
-    self.sceneClipView.clipsToBounds = YES;
-    [root addSubview:self.sceneClipView];
-
-    hostedView.bounds = screen;
+- (void)attachHostedView:(UIView *)hostedView bundleIdentifier:(NSString *)bundleIdentifier {
+    if (!self.hostWindow || !self.sceneClipView) return;
+    [self.hostedView removeFromSuperview];
+    self.hostedView = hostedView;
+    hostedView.userInteractionEnabled = YES;
     hostedView.layer.anchorPoint = CGPointZero;
     hostedView.layer.position = CGPointZero;
-    hostedView.transform = CGAffineTransformMakeScale(scale, scale);
-    hostedView.userInteractionEnabled = YES;
-    [self.sceneClipView addSubview:hostedView];
+    [self.sceneClipView insertSubview:hostedView atIndex:0];
+    [self layoutHostWindowAnimated:NO];
 
-    self.hostWindow.hidden = NO;
-    SWFileLog(@"HOST-5 window presented %@ frame=%@", bundleIdentifier, NSStringFromCGRect(self.hostWindow.frame));
+    CGRect screen = [self activeScreenBounds];
+    UIInterfaceOrientation orientation = [self activeInterfaceOrientation];
+    [self.sceneHost updateSceneForHostBounds:screen interfaceOrientation:orientation];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (self.hostedView == hostedView) {
+            [self.sceneHost updateSceneForHostBounds:[self activeScreenBounds]
+                                interfaceOrientation:[self activeInterfaceOrientation]];
+            [self.loadingIndicator stopAnimating];
+        }
+    });
+    SWFileLog(@"HOST attached %@ frame=%@", bundleIdentifier, NSStringFromCGRect(self.hostWindow.frame));
+}
+
+- (void)layoutHostWindowAnimated:(BOOL)animated {
+    if (!self.hostWindow) return;
+    CGRect screen = [self activeScreenBounds];
+    CGRect frame = [self hostFrameForCurrentScale];
+    CGFloat titleHeight = [self hostTitleHeight];
+    CGFloat contentWidth = CGRectGetWidth(frame);
+    CGFloat contentHeight = CGRectGetHeight(frame) - titleHeight;
+    void (^layoutBlock)(void) = ^{
+        self.hostWindow.frame = frame;
+        self.titleBar.frame = CGRectMake(0, 0, contentWidth, titleHeight);
+        self.hostIconView.frame = CGRectMake(10, 6, 22, 22);
+        CGFloat titleX = self.hostIconView.image ? 39.0 : 13.0;
+        self.hostTitleLabel.frame = CGRectMake(titleX, 0, MAX(20.0, contentWidth - titleX - 12.0), titleHeight);
+        self.sceneClipView.frame = CGRectMake(0, titleHeight, contentWidth, contentHeight);
+        self.loadingIndicator.center = CGPointMake(contentWidth * 0.5, contentHeight * 0.5);
+        self.resizeHandle.frame = CGRectMake(MAX(0.0, contentWidth - 34.0), MAX(titleHeight, CGRectGetHeight(frame) - 34.0), 34.0, 34.0);
+        UIImageView *resizeIcon = [self.resizeHandle viewWithTag:991];
+        resizeIcon.frame = CGRectMake(9, 9, 16, 16);
+        if (self.hostedView) {
+            self.hostedView.bounds = CGRectMake(0, 0, CGRectGetWidth(screen), CGRectGetHeight(screen));
+            self.hostedView.layer.anchorPoint = CGPointZero;
+            self.hostedView.layer.position = CGPointZero;
+            self.hostedView.transform = CGAffineTransformMakeScale(self.hostScale, self.hostScale);
+        }
+    };
+    if (animated) [UIView animateWithDuration:0.12 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut animations:layoutBlock completion:nil];
+    else layoutBlock();
+}
+
+- (void)backdropTapped:(__unused UITapGestureRecognizer *)gesture {
+    [self dismissHostWindowPreservingScene:YES];
 }
 
 - (void)dragHostWindow:(UIPanGestureRecognizer *)gesture {
@@ -408,27 +614,58 @@
     CGRect frame = window.frame;
     frame.origin.x += translation.x;
     frame.origin.y += translation.y;
-    CGRect screen = UIScreen.mainScreen.bounds;
-    frame.origin.x = MAX(0.0, MIN(frame.origin.x, CGRectGetWidth(screen) - CGRectGetWidth(frame)));
-    frame.origin.y = MAX(24.0, MIN(frame.origin.y, CGRectGetHeight(screen) - CGRectGetHeight(frame) - 8.0));
+    CGRect screen = [self activeScreenBounds];
+    frame.origin.x = MAX(CGRectGetMinX(screen) + 4.0, MIN(frame.origin.x, CGRectGetMaxX(screen) - CGRectGetWidth(frame) - 4.0));
+    frame.origin.y = MAX(CGRectGetMinY(screen) + 18.0, MIN(frame.origin.y, CGRectGetMaxY(screen) - CGRectGetHeight(frame) - 8.0));
     window.frame = frame;
+    self.hostNormalizedCenter = CGPointMake(CGRectGetMidX(frame) / MAX(1.0, CGRectGetWidth(screen)),
+                                            CGRectGetMidY(frame) / MAX(1.0, CGRectGetHeight(screen)));
     [gesture setTranslation:CGPointZero inView:window];
 }
 
-- (void)closeHostWindow {
-    if (self.hostWindow) {
-        self.hostWindow.hidden = YES;
-        self.hostWindow.rootViewController = nil;
-        self.hostWindow = nil;
-        self.sceneClipView = nil;
-        self.hostTitleLabel = nil;
-        self.hostIconView = nil;
+- (void)resizeHostWindow:(UIPanGestureRecognizer *)gesture {
+    if (!self.hostWindow) return;
+    CGPoint translation = [gesture translationInView:self.hostWindow];
+    CGRect screen = [self activeScreenBounds];
+    CGFloat denominator = MAX(180.0, MIN(CGRectGetWidth(screen), CGRectGetHeight(screen)));
+    CGFloat delta = (translation.x + translation.y) * 0.5 / denominator;
+    if (fabs(delta) > 0.0001) {
+        self.hostScale = [self clampedHostScale:self.hostScale + delta];
+        [self layoutHostWindowAnimated:NO];
+        [gesture setTranslation:CGPointZero inView:self.hostWindow];
     }
-    [self.sceneHost close];
+    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        [SWPreferences setWindowScale:self.hostScale];
+        SWFileLog(@"HOST resize scale=%.3f frame=%@", self.hostScale, NSStringFromCGRect(self.hostWindow.frame));
+    }
+}
+
+- (void)dismissHostWindowPreservingScene:(BOOL)preserveScene {
+    self.hostWindow.hidden = YES;
+    self.backdropWindow.hidden = YES;
+    [self.loadingIndicator stopAnimating];
+    [self.hostedView removeFromSuperview];
+    self.hostedView = nil;
+    if (preserveScene) [self.sceneHost dismissPresentationPreservingScene];
+    else [self.sceneHost close];
+}
+
+- (void)closeHostWindow {
+    [self dismissHostWindowPreservingScene:NO];
+    self.hostWindow.rootViewController = nil;
+    self.hostWindow = nil;
+    self.backdropWindow.rootViewController = nil;
+    self.backdropWindow = nil;
+    self.titleBar = nil;
+    self.sceneClipView = nil;
+    self.resizeHandle = nil;
+    self.loadingIndicator = nil;
+    self.hostTitleLabel = nil;
+    self.hostIconView = nil;
 }
 
 - (void)showFailureBubble:(NSString *)message {
-    CGRect screen = UIScreen.mainScreen.bounds;
+    CGRect screen = [self activeScreenBounds];
     UIWindow *window = [self windowWithFrame:CGRectMake(24, 80, CGRectGetWidth(screen) - 48, 58) level:UIWindowLevelAlert + 120.0];
     if (!window) return;
     UILabel *label = [[UILabel alloc] initWithFrame:CGRectInset(window.bounds, 12, 8)];

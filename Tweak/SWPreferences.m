@@ -25,6 +25,26 @@ NSString * const SWPreferencesDomain = @"com.dream.splitwindow";
     return value == nil ? YES : [value boolValue];
 }
 
++ (BOOL)dismissRequiresDoubleTap {
+    id value = [self copyPreferenceForKey:@"DismissRequiresDoubleTap"];
+    return value == nil ? NO : [value boolValue];
+}
+
++ (double)windowScale {
+    id value = [self copyPreferenceForKey:@"WindowScale"];
+    double scale = [value respondsToSelector:@selector(doubleValue)] ? [value doubleValue] : 0.72;
+    return MIN(0.95, MAX(0.42, scale));
+}
+
++ (void)setWindowScale:(double)scale {
+    scale = MIN(0.95, MAX(0.42, scale));
+    CFStringRef domain = (__bridge CFStringRef)SWPreferencesDomain;
+    CFPreferencesSetAppValue(CFSTR("WindowScale"),
+                             (__bridge CFPropertyListRef)@(scale),
+                             domain);
+    CFPreferencesAppSynchronize(domain);
+}
+
 + (NSArray<NSString *> *)selectedBundleIdentifiers {
     id value = [self copyPreferenceForKey:@"SelectedApps"];
     if ([value isKindOfClass:[NSArray class]]) {

@@ -60,6 +60,8 @@ static int SWInt0(id obj, SEL sel) {
 @property (nonatomic, strong, nullable) UIView *fallbackHostView;
 @property (nonatomic, copy, nullable) NSString *sceneIdentifier;
 @property (nonatomic) BOOL ownsScene;
+@property (nonatomic) BOOL presentationSuspended;
+@property (nonatomic) CFAbsoluteTime openStartedAt;
 @property (nonatomic) NSUInteger openGeneration;
 @end
 
@@ -156,97 +158,44 @@ static int SWInt0(id obj, SEL sel) {
     return app;
 }
 
-- (BOOL)object:(id)object containsBundleIdentifier:(NSString *)bundleIdentifier {
-    if (!object || bundleIdentifier.length == 0) return NO;
-    return [[object description] rangeOfString:bundleIdentifier options:NSCaseInsensitiveSearch].location != NSNotFound;
-}
-
-- (BOOL)scene:(id)scene matchesBundleIdentifier:(NSString *)bundleIdentifier {
+- (BOOL)isSceneUsable:(id)scene {
     if (!scene) return NO;
-    if ([self object:scene containsBundleIdentifier:bundleIdentifier]) return YES;
-
-    for (NSString *path in @[@"identifier",
-                             @"settings.identifier",
-                             @"settings.persistentIdentifier",
-                             @"clientProcess.bundleIdentifier",
-                             @"clientProcess.identity.embeddedApplicationIdentifier",
-                             @"clientProcess.identity.applicationIdentifier",
-                             @"definition.clientIdentity.bundleIdentifier"]) {
-        @try {
-            id value = [scene valueForKeyPath:path];
-            if ([self object:value containsBundleIdentifier:bundleIdentifier]) return YES;
-        } @catch (__unused NSException *exception) {}
+    SEL validSelector = NSSelectorFromString(@"isValid");
+    if ([scene respondsToSelector:validSelector]) {
+        return ((BOOL (*)(id, SEL))objc_msgSend)(scene, validSelector);
     }
-    return NO;
+    return YES;
 }
 
-- (id)sceneFromCollection:(id)collection bundleIdentifier:(NSString *)bundleIdentifier {
-    if (!collection) return nil;
-    if ([collection isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *dictionary = collection;
-        for (id key in dictionary) {
-            id candidate = dictionary[key];
-            if ([self object:key containsBundleIdentifier:bundleIdentifier] ||
-                [self scene:candidate matchesBundleIdentifier:bundleIdentifier]) {
-                return candidate;
-            }
-        }
-        return nil;
-    }
-
-    if ([collection conformsToProtocol:@protocol(NSFastEnumeration)]) {
-        for (id candidate in collection) {
-            if ([self scene:candidate matchesBundleIdentifier:bundleIdentifier]) return candidate;
-        }
-    }
-    return nil;
-}
-
-- (id)sceneForBundleIdentifier:(NSString *)bundleIdentifier {
-    // SpringBoard already owns the authoritative SBApplication -> mainScene
-    // mapping. Use it first instead of guessing opaque FBScene identifiers.
+- (id)systemDefaultSceneForBundleIdentifier:(NSString *)bundleIdentifier matchedIdentifier:(NSString **)matchedIdentifier {
     id application = [self springBoardApplicationForBundleIdentifier:bundleIdentifier];
     id mainScene = SWMsg0(application, NSSelectorFromString(@"mainScene"));
-    if (mainScene) return mainScene;
+    if ([self isSceneUsable:mainScene]) {
+        if (matchedIdentifier) *matchedIdentifier = [SWMsg0(mainScene, NSSelectorFromString(@"identifier")) description];
+        return mainScene;
+    }
 
     id manager = [self sceneManager];
     if (!manager) return nil;
-
-    // Konban-era FBSceneManager exposes a deterministic scene identifier helper.
-    // Prefer it on iOS 16; only fall back to dictionary scanning if unavailable.
-    id sceneIdentifier = SWMsg1(manager, NSSelectorFromString(@"_createSceneIdentifierForApplicationID:"), bundleIdentifier);
-    if (sceneIdentifier) {
-        id directScene = SWMsg1(manager, NSSelectorFromString(@"sceneWithIdentifier:"), sceneIdentifier);
-        if (directScene) return directScene;
+    NSMutableArray<NSString *> *identifiers = [NSMutableArray array];
+    id generatedIdentifier = SWMsg1(manager,
+                                    NSSelectorFromString(@"_createSceneIdentifierForApplicationID:"),
+                                    bundleIdentifier);
+    if ([generatedIdentifier isKindOfClass:[NSString class]] && [generatedIdentifier length] > 0) {
+        [identifiers addObject:generatedIdentifier];
     }
-
-    id scenes = nil;
-    @try {
-        id value = [manager valueForKey:@"_scenesByID"];
-        if (value) scenes = value;
-    } @catch (__unused NSException *exception) {}
-
-    if (!scenes) {
-        @try {
-            id value = [manager valueForKey:@"scenesByID"];
-            if (value) scenes = value;
-        } @catch (__unused NSException *exception) {}
+    [identifiers addObjectsFromArray:@[
+        [NSString stringWithFormat:@"sceneID:%@-default", bundleIdentifier],
+        [NSString stringWithFormat:@"sceneID:%@", bundleIdentifier],
+        [NSString stringWithFormat:@"%@-default", bundleIdentifier]
+    ]];
+    for (NSString *identifier in identifiers) {
+        id scene = SWMsg1(manager, NSSelectorFromString(@"sceneWithIdentifier:"), identifier);
+        if ([self isSceneUsable:scene]) {
+            if (matchedIdentifier) *matchedIdentifier = identifier;
+            return scene;
+        }
     }
-
-    if (sceneIdentifier && [scenes isKindOfClass:[NSDictionary class]]) {
-        id directScene = [(NSDictionary *)scenes objectForKey:sceneIdentifier];
-        if (directScene) return directScene;
-    }
-
-    id scanned = [self sceneFromCollection:scenes bundleIdentifier:bundleIdentifier];
-    if (scanned) return scanned;
-
-    // FBSceneWorkspace on newer iOS builds may expose a collection through
-    // `scenes` while the old `_scenesByID` ivar is absent or opaque.
-    id workspaceScenes = SWMsg0(manager, NSSelectorFromString(@"scenes"));
-    scanned = [self sceneFromCollection:workspaceScenes bundleIdentifier:bundleIdentifier];
-    if (scanned) return scanned;
-
     return nil;
 }
 
@@ -434,10 +383,23 @@ static int SWInt0(id obj, SEL sel) {
     id manager = SWMsg0(scene, NSSelectorFromString(@"uiPresentationManager"));
     if (!manager) return nil;
 
-    NSString *identifier = self.sceneIdentifier ?: [NSString stringWithFormat:@"com.dream.splitwindow.presenter.%@",
-                                                      NSUUID.UUID.UUIDString];
-    id presenter = SWMsg1(manager, NSSelectorFromString(@"createPresenterWithIdentifier:"), identifier);
+    id presenter = self.presenter;
+    if (!presenter) {
+        NSString *identifier = [NSString stringWithFormat:@"com.dream.splitwindow.presenter.%@.%@",
+                                self.bundleIdentifier ?: @"app",
+                                NSUUID.UUID.UUIDString];
+        presenter = SWMsg1(manager, NSSelectorFromString(@"createPresenterWithIdentifier:"), identifier);
+        if (presenter) SWFileLog(@"HOST presenter created %@ id=%@", self.bundleIdentifier, identifier);
+    }
     if (!presenter) return nil;
+
+    SEL modifyContext = NSSelectorFromString(@"modifyPresentationContext:");
+    if ([presenter respondsToSelector:modifyContext]) {
+        void (^contextBlock)(id) = ^(id context) {
+            SWVoidInteger(context, NSSelectorFromString(@"setAppearanceStyle:"), 2);
+        };
+        SWVoid1(presenter, modifyContext, contextBlock);
+    }
 
     SWVoid0(presenter, NSSelectorFromString(@"activate"));
     UIView *view = SWMsg0(presenter, NSSelectorFromString(@"presentationView"));
@@ -448,7 +410,8 @@ static int SWInt0(id obj, SEL sel) {
     }
 
     self.presenter = presenter;
-    SWFileLog(@"HOST presenter active %@ id=%@", self.bundleIdentifier, identifier);
+    self.presentationSuspended = NO;
+    SWFileLog(@"HOST presenter active %@ sceneID=%@", self.bundleIdentifier, self.sceneIdentifier);
     return view;
 }
 
@@ -482,11 +445,57 @@ static int SWInt0(id obj, SEL sel) {
     return host;
 }
 
+- (void)updateSceneForHostBounds:(CGRect)hostBounds interfaceOrientation:(UIInterfaceOrientation)orientation {
+    id scene = self.scene;
+    if (!scene) return;
+
+    CGRect sceneFrame = hostBounds;
+    sceneFrame.origin = CGPointZero;
+    if (UIInterfaceOrientationIsLandscape(orientation) && sceneFrame.size.width > sceneFrame.size.height) {
+        CGFloat width = sceneFrame.size.width;
+        sceneFrame.size.width = sceneFrame.size.height;
+        sceneFrame.size.height = width;
+    }
+
+    void (^updateBlock)(id) = ^(id settings) {
+        SWVoidBool(settings, NSSelectorFromString(@"setForeground:"), YES);
+        SWVoidBool(settings, NSSelectorFromString(@"setBackgrounded:"), NO);
+        SWVoidCGRect(settings, NSSelectorFromString(@"setFrame:"), sceneFrame);
+        SWVoidInteger(settings, NSSelectorFromString(@"setInterfaceOrientation:"), orientation);
+        SWVoidInteger(settings, NSSelectorFromString(@"setDeviceOrientation:"), UIDevice.currentDevice.orientation);
+    };
+
+    SEL updateWithBlock = NSSelectorFromString(@"updateSettingsWithBlock:");
+    if ([scene respondsToSelector:updateWithBlock]) {
+        SWVoid1(scene, updateWithBlock, updateBlock);
+    } else {
+        id settings = SWMsg0(scene, NSSelectorFromString(@"mutableSettings"));
+        if (!settings) {
+            @try { settings = [[scene valueForKey:@"settings"] mutableCopy]; }
+            @catch (__unused NSException *exception) {}
+        }
+        if (settings) {
+            updateBlock(settings);
+            SEL update3 = NSSelectorFromString(@"updateSettings:withTransitionContext:completion:");
+            if ([scene respondsToSelector:update3]) {
+                ((void (*)(id, SEL, id, id, id))objc_msgSend)(scene, update3, settings, nil, nil);
+            } else {
+                SWVoid2(scene, NSSelectorFromString(@"updateSettings:withTransitionContext:"), settings, nil);
+            }
+        }
+    }
+
+    SWFileLog(@"SCENE-GEOMETRY %@ orientation=%ld frame=%@",
+              self.bundleIdentifier,
+              (long)orientation,
+              NSStringFromCGRect(sceneFrame));
+}
+
 - (void)finishOpenForScene:(id)scene generation:(NSUInteger)generation completion:(SWSceneHostCompletion)completion {
     if (generation != self.openGeneration) return;
 
     self.scene = scene;
-    SWFileLog(@"SCENE-3 foreground begin %@ scene=%@", self.bundleIdentifier, scene);
+    SWFileLog(@"SCENE-ACTIVATE %@ scene=%@ owned=%d", self.bundleIdentifier, scene, self.ownsScene);
     [self setScene:scene foreground:YES];
 
     UIView *hostedView = [self modernPresentationViewForScene:scene];
@@ -502,52 +511,69 @@ static int SWInt0(id obj, SEL sel) {
     }
 
     hostedView.userInteractionEnabled = YES;
+    CFAbsoluteTime elapsed = (CFAbsoluteTimeGetCurrent() - self.openStartedAt) * 1000.0;
+    SWFileLog(@"OPEN ready %@ source=%@ elapsed=%.0fms",
+              self.bundleIdentifier,
+              self.ownsScene ? @"owned" : @"system",
+              elapsed);
     completion(hostedView, nil);
 }
 
-- (void)pollSceneForBundleIdentifier:(NSString *)bundleIdentifier
-                          generation:(NSUInteger)generation
-                             attempt:(NSUInteger)attempt
-                          completion:(SWSceneHostCompletion)completion {
+- (BOOL)resumeWarmSceneForBundleIdentifier:(NSString *)bundleIdentifier
+                                 generation:(NSUInteger)generation
+                                  completion:(SWSceneHostCompletion)completion {
+    if (![self.bundleIdentifier isEqualToString:bundleIdentifier] || ![self isSceneUsable:self.scene]) return NO;
+
+    [self setScene:self.scene foreground:YES];
+    UIView *hostedView = [self modernPresentationViewForScene:self.scene];
+    if (!hostedView && self.fallbackHostView) hostedView = self.fallbackHostView;
+    if (!hostedView) return NO;
+
+    self.presentationSuspended = NO;
+    hostedView.userInteractionEnabled = YES;
+    CFAbsoluteTime elapsed = (CFAbsoluteTimeGetCurrent() - self.openStartedAt) * 1000.0;
+    SWFileLog(@"OPEN warm-resume %@ elapsed=%.0fms", bundleIdentifier, elapsed);
+    if (generation == self.openGeneration) completion(hostedView, nil);
+    return YES;
+}
+
+- (void)pollSystemSceneForBundleIdentifier:(NSString *)bundleIdentifier
+                              processHandle:(id)processHandle
+                                 generation:(NSUInteger)generation
+                                    attempt:(NSUInteger)attempt
+                                maxAttempts:(NSUInteger)maxAttempts
+                                 completion:(SWSceneHostCompletion)completion {
     if (generation != self.openGeneration) return;
 
-    id scene = [self sceneForBundleIdentifier:bundleIdentifier];
-    if (scene) {
-        SWFileLog(@"SCENE-3 found %@ attempts=%lu", bundleIdentifier, (unsigned long)attempt);
-        [self finishOpenForScene:scene generation:generation completion:completion];
-        return;
-    }
-
-    if (attempt == 0 || attempt == 10 || attempt == 20 || attempt == 30) {
-        id application = [self springBoardApplicationForBundleIdentifier:bundleIdentifier];
-        id appScene = SWMsg0(application, NSSelectorFromString(@"mainScene"));
-        id manager = [self sceneManager];
-        id managerScenes = nil;
-        @try { managerScenes = [manager valueForKey:@"_scenesByID"]; }
-        @catch (__unused NSException *exception) {}
-        if (!managerScenes) managerScenes = SWMsg0(manager, NSSelectorFromString(@"scenes"));
-        NSUInteger count = [managerScenes respondsToSelector:@selector(count)] ? (NSUInteger)[managerScenes count] : 0;
-        SWFileLog(@"SCENE-DIAG %@ attempt=%lu app=%@ mainScene=%@ manager=%@ collection=%@ count=%lu",
+    NSString *matchedIdentifier = nil;
+    id systemScene = [self systemDefaultSceneForBundleIdentifier:bundleIdentifier matchedIdentifier:&matchedIdentifier];
+    if (systemScene) {
+        self.sceneIdentifier = matchedIdentifier.length > 0 ? matchedIdentifier : [NSString stringWithFormat:@"sceneID:%@-default", bundleIdentifier];
+        self.ownsScene = NO;
+        SWFileLog(@"SCENE-SYSTEM found %@ attempt=%lu id=%@ scene=%@",
                   bundleIdentifier,
                   (unsigned long)attempt,
-                  application,
-                  appScene,
-                  manager,
-                  [managerScenes class],
-                  (unsigned long)count);
-    }
-
-    if (attempt >= 40) {
-        NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow"
-                                             code:2
-                                         userInfo:@{NSLocalizedDescriptionKey: @"Timed out waiting for FBScene."}];
-        SWFileLog(@"SCENE-3 timeout %@", bundleIdentifier);
-        completion(nil, error);
+                  self.sceneIdentifier,
+                  systemScene);
+        [self finishOpenForScene:systemScene generation:generation completion:completion];
         return;
     }
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self pollSceneForBundleIdentifier:bundleIdentifier generation:generation attempt:attempt + 1 completion:completion];
+    if (attempt >= maxAttempts) {
+        SWFileLog(@"SCENE-SYSTEM miss %@ after=%lums fallback=owned",
+                  bundleIdentifier,
+                  (unsigned long)(maxAttempts * 50));
+        [self finishOpenForProcessHandle:processHandle generation:generation completion:completion];
+        return;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self pollSystemSceneForBundleIdentifier:bundleIdentifier
+                                   processHandle:processHandle
+                                      generation:generation
+                                         attempt:attempt + 1
+                                     maxAttempts:maxAttempts
+                                      completion:completion];
     });
 }
 
@@ -563,21 +589,7 @@ static int SWInt0(id obj, SEL sel) {
         completion(nil, sceneError);
         return;
     }
-
-    self.scene = scene;
-    UIView *hostedView = [self modernPresentationViewForScene:scene];
-    if (!hostedView) hostedView = [self legacyLayerHostViewForScene:scene];
-    if (!hostedView) {
-        NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow"
-                                             code:25
-                                         userInfo:@{NSLocalizedDescriptionKey:@"Scene was created, but no presentation view was available."}];
-        SWFileLog(@"HOST failed %@ scene=%@", self.bundleIdentifier, scene);
-        completion(nil, error);
-        return;
-    }
-
-    hostedView.userInteractionEnabled = YES;
-    completion(hostedView, nil);
+    [self finishOpenForScene:scene generation:generation completion:completion];
 }
 
 - (void)pollProcessForBundleIdentifier:(NSString *)bundleIdentifier
@@ -586,15 +598,33 @@ static int SWInt0(id obj, SEL sel) {
                              completion:(SWSceneHostCompletion)completion {
     if (generation != self.openGeneration) return;
 
+    NSString *matchedIdentifier = nil;
+    id earlySystemScene = [self systemDefaultSceneForBundleIdentifier:bundleIdentifier matchedIdentifier:&matchedIdentifier];
+    if (earlySystemScene) {
+        self.sceneIdentifier = matchedIdentifier.length > 0 ? matchedIdentifier : [NSString stringWithFormat:@"sceneID:%@-default", bundleIdentifier];
+        self.ownsScene = NO;
+        SWFileLog(@"SCENE-SYSTEM early %@ attempt=%lu id=%@",
+                  bundleIdentifier,
+                  (unsigned long)attempt,
+                  self.sceneIdentifier);
+        [self finishOpenForScene:earlySystemScene generation:generation completion:completion];
+        return;
+    }
+
     id handle = [self processHandleForBundleIdentifier:bundleIdentifier];
     int pid = SWInt0(handle, NSSelectorFromString(@"pid"));
     if (handle && pid > 0) {
         SWFileLog(@"PROC ready %@ pid=%d attempts=%lu", bundleIdentifier, pid, (unsigned long)attempt);
-        [self finishOpenForProcessHandle:handle generation:generation completion:completion];
+        [self pollSystemSceneForBundleIdentifier:bundleIdentifier
+                                   processHandle:handle
+                                      generation:generation
+                                         attempt:0
+                                     maxAttempts:24
+                                      completion:completion];
         return;
     }
 
-    if (attempt == 0 || attempt == 10 || attempt == 20) {
+    if (attempt == 0 || attempt == 10 || attempt == 20 || attempt == 30) {
         SWFileLog(@"PROC wait %@ attempt=%lu handle=%@ pid=%d",
                   bundleIdentifier,
                   (unsigned long)attempt,
@@ -602,7 +632,7 @@ static int SWInt0(id obj, SEL sel) {
                   pid);
     }
 
-    if (attempt >= 30) {
+    if (attempt >= 40) {
         NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow"
                                              code:2
                                          userInfo:@{NSLocalizedDescriptionKey:@"Timed out waiting for the target app process."}];
@@ -611,7 +641,7 @@ static int SWInt0(id obj, SEL sel) {
         return;
     }
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self pollProcessForBundleIdentifier:bundleIdentifier
                                   generation:generation
                                      attempt:attempt + 1
@@ -625,6 +655,14 @@ static int SWInt0(id obj, SEL sel) {
         return;
     }
 
+    self.openStartedAt = CFAbsoluteTimeGetCurrent();
+
+    if ([self.bundleIdentifier isEqualToString:bundleIdentifier] && [self isSceneUsable:self.scene]) {
+        self.openGeneration += 1;
+        NSUInteger warmGeneration = self.openGeneration;
+        if ([self resumeWarmSceneForBundleIdentifier:bundleIdentifier generation:warmGeneration completion:completion]) return;
+    }
+
     [self close];
     self.openGeneration += 1;
     NSUInteger generation = self.openGeneration;
@@ -634,12 +672,25 @@ static int SWInt0(id obj, SEL sel) {
     int pid = SWInt0(handle, NSSelectorFromString(@"pid"));
     SWFileLog(@"OPEN process lookup %@ handle=%@ pid=%d", bundleIdentifier, handle, pid);
     if (handle && pid > 0) {
-        [self finishOpenForProcessHandle:handle generation:generation completion:completion];
+        [self pollSystemSceneForBundleIdentifier:bundleIdentifier
+                                   processHandle:handle
+                                      generation:generation
+                                         attempt:0
+                                     maxAttempts:6
+                                      completion:completion];
         return;
     }
 
     [self launchSuspended:bundleIdentifier];
     [self pollProcessForBundleIdentifier:bundleIdentifier generation:generation attempt:0 completion:completion];
+}
+
+- (void)dismissPresentationPreservingScene {
+    if (!self.scene) return;
+    if (self.presenter) SWVoid0(self.presenter, NSSelectorFromString(@"deactivate"));
+    [self setScene:self.scene foreground:NO];
+    self.presentationSuspended = YES;
+    SWFileLog(@"HOST warm-suspend %@ scene=%@", self.bundleIdentifier, self.scene);
 }
 
 - (void)destroyOwnedSceneIfNeeded {
@@ -655,6 +706,7 @@ static int SWInt0(id obj, SEL sel) {
 - (void)close {
     self.openGeneration += 1;
 
+    if (self.scene) [self setScene:self.scene foreground:NO];
     if (self.presenter) {
         SWVoid0(self.presenter, NSSelectorFromString(@"deactivate"));
         SWVoid0(self.presenter, NSSelectorFromString(@"invalidate"));
@@ -669,6 +721,7 @@ static int SWInt0(id obj, SEL sel) {
     self.scene = nil;
     self.sceneIdentifier = nil;
     self.ownsScene = NO;
+    self.presentationSuspended = NO;
     self.bundleIdentifier = nil;
 }
 

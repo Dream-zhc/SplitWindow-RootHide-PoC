@@ -11,6 +11,8 @@ typedef void (^SWSceneHostCompletion)(UIView * _Nullable hostedView, NSError * _
 @property (nonatomic, strong, readonly, nullable) id presenter;
 
 - (void)openBundleIdentifier:(NSString *)bundleIdentifier completion:(SWSceneHostCompletion)completion;
+- (void)updateSceneForHostBounds:(CGRect)hostBounds interfaceOrientation:(UIInterfaceOrientation)orientation;
+- (void)dismissPresentationPreservingScene;
 - (void)close;
 @end
 
