@@ -20,6 +20,7 @@
 @property (nonatomic, strong) UIView *sceneClipView;
 @property (nonatomic, strong) SWSceneHost *sceneHost;
 @property (nonatomic, strong) UILabel *hostTitleLabel;
+@property (nonatomic, strong) UIImageView *hostIconView;
 @end
 
 @implementation SWOverlayController
@@ -204,6 +205,28 @@
     return bundleIdentifier;
 }
 
+- (UIImage *)iconForBundleIdentifier:(NSString *)bundleIdentifier {
+    if (bundleIdentifier.length == 0) return nil;
+    SEL selector = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
+    if ([UIImage respondsToSelector:selector]) {
+        UIImage *image = ((id (*)(id, SEL, id, NSInteger, CGFloat))objc_msgSend)(UIImage.class,
+                                                                                 selector,
+                                                                                 bundleIdentifier,
+                                                                                 10,
+                                                                                 UIScreen.mainScreen.scale);
+        if ([image isKindOfClass:[UIImage class]]) {
+            CGSize size = CGSizeMake(30.0, 30.0);
+            UIGraphicsBeginImageContextWithOptions(size, NO, UIScreen.mainScreen.scale);
+            [image drawInRect:(CGRect){CGPointZero, size}];
+            UIImage *scaled = UIGraphicsGetImageFromCurrentImageContext();
+            UIGraphicsEndImageContext();
+            return [scaled imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+        }
+    }
+    if (@available(iOS 13.0, *)) return [UIImage systemImageNamed:@"app.fill"];
+    return nil;
+}
+
 - (void)showPanel {
     if (![SWPreferences enabled]) return;
     [self rebuildPanel];
@@ -217,9 +240,9 @@
 - (void)rebuildPanel {
     NSArray<NSString *> *apps = [SWPreferences selectedBundleIdentifiers];
     CGRect screen = UIScreen.mainScreen.bounds;
-    CGFloat width = MIN(170.0, CGRectGetWidth(screen) * 0.44);
-    CGFloat rowHeight = 52.0;
-    CGFloat height = MIN(CGRectGetHeight(screen) - 120.0, MAX(70.0, apps.count * rowHeight + 18.0));
+    CGFloat width = MIN(196.0, CGRectGetWidth(screen) * 0.50);
+    CGFloat rowHeight = 58.0;
+    CGFloat height = MIN(CGRectGetHeight(screen) - 120.0, MAX(78.0, apps.count * rowHeight + 20.0));
     CGRect frame = CGRectMake(CGRectGetWidth(screen) - width - 12.0,
                               (CGRectGetHeight(screen) - height) / 2.0,
                               width, height);
@@ -236,11 +259,16 @@
 
     UIView *root = self.panelWindow.rootViewController.view;
     [root.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
-    root.backgroundColor = [UIColor colorWithWhite:0.06 alpha:0.94];
-    root.layer.cornerRadius = 20.0;
+    root.backgroundColor = UIColor.clearColor;
+    root.layer.cornerRadius = 24.0;
     root.layer.borderWidth = 0.5;
     root.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.16].CGColor;
     root.clipsToBounds = YES;
+
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark]];
+    blur.frame = root.bounds;
+    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [root addSubview:blur];
 
     UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectInset(root.bounds, 8.0, 9.0)];
     scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -255,10 +283,17 @@
         [button setTitle:[self displayNameForBundleIdentifier:bundleID] forState:UIControlStateNormal];
         [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
         button.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-        button.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
-        button.layer.cornerRadius = 12.0;
+        button.backgroundColor = [UIColor colorWithWhite:1 alpha:0.075];
+        button.layer.cornerRadius = 14.0;
         button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-        button.contentEdgeInsets = UIEdgeInsetsMake(0, 14, 0, 10);
+        button.contentEdgeInsets = UIEdgeInsetsMake(0, 12, 0, 10);
+        UIImage *icon = [self iconForBundleIdentifier:bundleID];
+        if (icon) {
+            [button setImage:icon forState:UIControlStateNormal];
+            button.imageView.contentMode = UIViewContentModeScaleAspectFit;
+            button.imageEdgeInsets = UIEdgeInsetsMake(8, 0, 8, 0);
+            button.titleEdgeInsets = UIEdgeInsetsMake(0, 9, 0, 0);
+        }
         [button addTarget:self action:@selector(appButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
         [scroll addSubview:button];
         y += rowHeight;
@@ -318,6 +353,18 @@
     [root addSubview:titleBar];
 
     self.hostTitleLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, contentWidth - 58, titleHeight)];
+    UIImage *icon = [self iconForBundleIdentifier:bundleIdentifier];
+    CGFloat titleX = 14.0;
+    if (icon) {
+        self.hostIconView = [[UIImageView alloc] initWithImage:icon];
+        self.hostIconView.frame = CGRectMake(10, 7, 22, 22);
+        self.hostIconView.contentMode = UIViewContentModeScaleAspectFit;
+        self.hostIconView.layer.cornerRadius = 5.0;
+        self.hostIconView.layer.masksToBounds = YES;
+        [titleBar addSubview:self.hostIconView];
+        titleX = 39.0;
+    }
+    self.hostTitleLabel.frame = CGRectMake(titleX, 0, contentWidth - titleX - 44, titleHeight);
     self.hostTitleLabel.text = [self displayNameForBundleIdentifier:bundleIdentifier];
     self.hostTitleLabel.textColor = UIColor.whiteColor;
     self.hostTitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
@@ -371,6 +418,7 @@
         self.hostWindow = nil;
         self.sceneClipView = nil;
         self.hostTitleLabel = nil;
+        self.hostIconView = nil;
     }
     [self.sceneHost close];
 }

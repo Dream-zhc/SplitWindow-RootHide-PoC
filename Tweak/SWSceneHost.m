@@ -33,11 +33,6 @@ static void SWVoidBool(id obj, SEL sel, BOOL value) {
     ((void (*)(id, SEL, BOOL))objc_msgSend)(obj, sel, value);
 }
 
-static void SWVoidInteger(id obj, SEL sel, NSInteger value) {
-    if (!obj || ![obj respondsToSelector:sel]) return;
-    ((void (*)(id, SEL, NSInteger))objc_msgSend)(obj, sel, value);
-}
-
 @interface SWSceneHost ()
 @property (nonatomic, copy, readwrite, nullable) NSString *bundleIdentifier;
 @property (nonatomic, strong, readwrite, nullable) id scene;
@@ -51,11 +46,72 @@ static void SWVoidInteger(id obj, SEL sel, NSInteger value) {
 - (id)sceneManager {
     Class managerClass = NSClassFromString(@"FBSceneManager");
     id manager = SWMsg0(managerClass, NSSelectorFromString(@"sharedInstance"));
-    SWFileLog(@"SCENE-1 manager class=%@ manager=%@", managerClass, manager);
     return manager;
 }
 
+- (id)springBoardApplicationForBundleIdentifier:(NSString *)bundleIdentifier {
+    Class controllerClass = NSClassFromString(@"SBApplicationController");
+    id controller = SWMsg0(controllerClass, NSSelectorFromString(@"sharedInstance"));
+    if (!controller) return nil;
+
+    id app = SWMsg1(controller, NSSelectorFromString(@"applicationWithBundleIdentifier:"), bundleIdentifier);
+    if (!app) app = SWMsg1(controller, NSSelectorFromString(@"applicationWithDisplayIdentifier:"), bundleIdentifier);
+    return app;
+}
+
+- (BOOL)object:(id)object containsBundleIdentifier:(NSString *)bundleIdentifier {
+    if (!object || bundleIdentifier.length == 0) return NO;
+    return [[object description] rangeOfString:bundleIdentifier options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
+
+- (BOOL)scene:(id)scene matchesBundleIdentifier:(NSString *)bundleIdentifier {
+    if (!scene) return NO;
+    if ([self object:scene containsBundleIdentifier:bundleIdentifier]) return YES;
+
+    for (NSString *path in @[@"identifier",
+                             @"settings.identifier",
+                             @"settings.persistentIdentifier",
+                             @"clientProcess.bundleIdentifier",
+                             @"clientProcess.identity.embeddedApplicationIdentifier",
+                             @"clientProcess.identity.applicationIdentifier",
+                             @"definition.clientIdentity.bundleIdentifier"]) {
+        @try {
+            id value = [scene valueForKeyPath:path];
+            if ([self object:value containsBundleIdentifier:bundleIdentifier]) return YES;
+        } @catch (__unused NSException *exception) {}
+    }
+    return NO;
+}
+
+- (id)sceneFromCollection:(id)collection bundleIdentifier:(NSString *)bundleIdentifier {
+    if (!collection) return nil;
+    if ([collection isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dictionary = collection;
+        for (id key in dictionary) {
+            id candidate = dictionary[key];
+            if ([self object:key containsBundleIdentifier:bundleIdentifier] ||
+                [self scene:candidate matchesBundleIdentifier:bundleIdentifier]) {
+                return candidate;
+            }
+        }
+        return nil;
+    }
+
+    if ([collection conformsToProtocol:@protocol(NSFastEnumeration)]) {
+        for (id candidate in collection) {
+            if ([self scene:candidate matchesBundleIdentifier:bundleIdentifier]) return candidate;
+        }
+    }
+    return nil;
+}
+
 - (id)sceneForBundleIdentifier:(NSString *)bundleIdentifier {
+    // SpringBoard already owns the authoritative SBApplication -> mainScene
+    // mapping. Use it first instead of guessing opaque FBScene identifiers.
+    id application = [self springBoardApplicationForBundleIdentifier:bundleIdentifier];
+    id mainScene = SWMsg0(application, NSSelectorFromString(@"mainScene"));
+    if (mainScene) return mainScene;
+
     id manager = [self sceneManager];
     if (!manager) return nil;
 
@@ -67,38 +123,33 @@ static void SWVoidInteger(id obj, SEL sel, NSInteger value) {
         if (directScene) return directScene;
     }
 
-    NSDictionary *scenes = nil;
+    id scenes = nil;
     @try {
         id value = [manager valueForKey:@"_scenesByID"];
-        if ([value isKindOfClass:[NSDictionary class]]) scenes = value;
+        if (value) scenes = value;
     } @catch (__unused NSException *exception) {}
 
     if (!scenes) {
         @try {
             id value = [manager valueForKey:@"scenesByID"];
-            if ([value isKindOfClass:[NSDictionary class]]) scenes = value;
+            if (value) scenes = value;
         } @catch (__unused NSException *exception) {}
     }
 
-    if (sceneIdentifier && scenes[sceneIdentifier]) return scenes[sceneIdentifier];
-
-    for (id key in scenes) {
-        NSString *identifier = [key description];
-        id candidate = scenes[key];
-        if ([identifier rangeOfString:bundleIdentifier options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            return candidate;
-        }
-
-        // Last-resort KVC checks for iOS builds whose FBScene dictionary key is opaque.
-        for (NSString *path in @[@"identifier", @"settings.identifier", @"settings.persistentIdentifier"]) {
-            @try {
-                id value = [candidate valueForKeyPath:path];
-                if ([[value description] rangeOfString:bundleIdentifier options:NSCaseInsensitiveSearch].location != NSNotFound) {
-                    return candidate;
-                }
-            } @catch (__unused NSException *exception) {}
-        }
+    if (sceneIdentifier && [scenes isKindOfClass:[NSDictionary class]]) {
+        id directScene = [(NSDictionary *)scenes objectForKey:sceneIdentifier];
+        if (directScene) return directScene;
     }
+
+    id scanned = [self sceneFromCollection:scenes bundleIdentifier:bundleIdentifier];
+    if (scanned) return scanned;
+
+    // FBSceneWorkspace on newer iOS builds may expose a collection through
+    // `scenes` while the old `_scenesByID` ivar is absent or opaque.
+    id workspaceScenes = SWMsg0(manager, NSSelectorFromString(@"scenes"));
+    scanned = [self sceneFromCollection:workspaceScenes bundleIdentifier:bundleIdentifier];
+    if (scanned) return scanned;
+
     return nil;
 }
 
@@ -116,9 +167,6 @@ static void SWVoidInteger(id obj, SEL sel, NSInteger value) {
 - (void)setScene:(id)scene foreground:(BOOL)foreground {
     if (!scene) return;
 
-    SEL contentStateSelector = NSSelectorFromString(@"_setContentState:");
-    SWVoidInteger(scene, contentStateSelector, foreground ? 2 : 0);
-
     id settings = SWMsg0(scene, NSSelectorFromString(@"mutableSettings"));
     if (!settings) {
         @try { settings = [[scene valueForKey:@"settings"] mutableCopy]; }
@@ -129,15 +177,15 @@ static void SWVoidInteger(id obj, SEL sel, NSInteger value) {
     SWVoidBool(settings, NSSelectorFromString(@"setForeground:"), foreground);
     SWVoidBool(settings, NSSelectorFromString(@"setBackgrounded:"), !foreground);
 
-    SEL update2 = NSSelectorFromString(@"updateSettings:withTransitionContext:");
-    if ([scene respondsToSelector:update2]) {
-        SWVoid2(scene, update2, settings, nil);
-        return;
-    }
-
     SEL update3 = NSSelectorFromString(@"updateSettings:withTransitionContext:completion:");
     if ([scene respondsToSelector:update3]) {
         ((void (*)(id, SEL, id, id, id))objc_msgSend)(scene, update3, settings, nil, nil);
+        return;
+    }
+
+    SEL update2 = NSSelectorFromString(@"updateSettings:withTransitionContext:");
+    if ([scene respondsToSelector:update2]) {
+        SWVoid2(scene, update2, settings, nil);
     }
 }
 
@@ -165,10 +213,20 @@ static void SWVoidInteger(id obj, SEL sel, NSInteger value) {
 
 - (UIView *)legacyLayerHostViewForScene:(id)scene {
     Class hostClass = NSClassFromString(@"_UISceneLayerHostContainerView");
-    SEL initSelector = NSSelectorFromString(@"initWithScene:");
-    if (!hostClass || ![hostClass instancesRespondToSelector:initSelector]) return nil;
+    if (!hostClass) return nil;
 
-    id host = ((id (*)(id, SEL, id))objc_msgSend)([hostClass alloc], initSelector, scene);
+    id host = nil;
+    SEL describedInit = NSSelectorFromString(@"initWithScene:debugDescription:");
+    if ([hostClass instancesRespondToSelector:describedInit]) {
+        host = ((id (*)(id, SEL, id, id))objc_msgSend)([hostClass alloc],
+                                                       describedInit,
+                                                       scene,
+                                                       @"SplitWindow");
+    } else {
+        SEL initSelector = NSSelectorFromString(@"initWithScene:");
+        if (![hostClass instancesRespondToSelector:initSelector]) return nil;
+        host = ((id (*)(id, SEL, id))objc_msgSend)([hostClass alloc], initSelector, scene);
+    }
     if (![host isKindOfClass:[UIView class]]) return nil;
 
     Class contextClass = NSClassFromString(@"UIScenePresentationContext");
@@ -219,6 +277,25 @@ static void SWVoidInteger(id obj, SEL sel, NSInteger value) {
         return;
     }
 
+    if (attempt == 0 || attempt == 10 || attempt == 20 || attempt == 30) {
+        id application = [self springBoardApplicationForBundleIdentifier:bundleIdentifier];
+        id appScene = SWMsg0(application, NSSelectorFromString(@"mainScene"));
+        id manager = [self sceneManager];
+        id managerScenes = nil;
+        @try { managerScenes = [manager valueForKey:@"_scenesByID"]; }
+        @catch (__unused NSException *exception) {}
+        if (!managerScenes) managerScenes = SWMsg0(manager, NSSelectorFromString(@"scenes"));
+        NSUInteger count = [managerScenes respondsToSelector:@selector(count)] ? (NSUInteger)[managerScenes count] : 0;
+        SWFileLog(@"SCENE-DIAG %@ attempt=%lu app=%@ mainScene=%@ manager=%@ collection=%@ count=%lu",
+                  bundleIdentifier,
+                  (unsigned long)attempt,
+                  application,
+                  appScene,
+                  manager,
+                  [managerScenes class],
+                  (unsigned long)count);
+    }
+
     if (attempt >= 40) {
         NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow"
                                              code:2
@@ -243,6 +320,12 @@ static void SWVoidInteger(id obj, SEL sel, NSInteger value) {
     self.openGeneration += 1;
     NSUInteger generation = self.openGeneration;
     self.bundleIdentifier = bundleIdentifier;
+
+    id application = [self springBoardApplicationForBundleIdentifier:bundleIdentifier];
+    SWFileLog(@"SCENE-0 app lookup %@ app=%@ mainScene=%@",
+              bundleIdentifier,
+              application,
+              SWMsg0(application, NSSelectorFromString(@"mainScene")));
 
     id existingScene = [self sceneForBundleIdentifier:bundleIdentifier];
     if (existingScene) {

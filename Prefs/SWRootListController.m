@@ -2,6 +2,9 @@
 #import <Preferences/PSSpecifier.h>
 #import <CoreFoundation/CoreFoundation.h>
 
+@interface SWAppListController : UITableViewController
+@end
+
 static NSString * const SWPrefsDomain = @"com.dream.splitwindow";
 static NSString * const SWActivationNotification = @"com.dream.splitwindow/activationRequested";
 static NSString * const SWPreferencesNotification = @"com.dream.splitwindow/preferencesChanged";
@@ -66,6 +69,13 @@ static NSString * const SWPreferencesNotification = @"com.dream.splitwindow/pref
 
 - (void)activateSplitWindow {
     [self postDarwinNotification:SWActivationNotification];
+}
+
+- (void)showAppPicker {
+    Class controllerClass = NSClassFromString(@"SWAppListController");
+    if (!controllerClass) return;
+    UIViewController *controller = [controllerClass new];
+    [self.navigationController pushViewController:controller animated:YES];
 }
 
 @end

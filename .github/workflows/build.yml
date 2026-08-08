@@ -132,6 +132,12 @@ jobs:
           fi
           strings "$PREFS_BIN" | grep -q 'com.dream.splitwindow/activationRequested'
           strings "$PREFS_BIN" | grep -q 'SWRootListController'
+          strings "$PREFS_BIN" | grep -q 'SWAppListController'
+          strings "$PREFS_BIN" | grep -q 'showAppPicker'
+          strings "$PREFS_BIN" | grep -q '_applicationIconImageForBundleIdentifier:format:scale:'
+          strings "$FEATURE" | grep -q 'SBApplicationController'
+          strings "$FEATURE" | grep -q 'mainScene'
+          strings "$FEATURE" | grep -q 'initWithScene:debugDescription:'
           plutil -p "$PREF_ENTRY" | grep -q 'SplitWindow.png'
           echo "--- Filter plist ---"
           plutil -p "$PLIST"
@@ -153,7 +159,7 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: SplitWindow-v0.4.3-RootHide
+          name: SplitWindow-v0.5.0-RootHide
           path: |
             packages/*.deb
             packages/BUILD-VERIFICATION.txt

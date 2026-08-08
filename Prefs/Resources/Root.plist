@@ -27,12 +27,17 @@
         </dict>
         <dict>
             <key>cell</key><string>PSButtonCell</string>
+            <key>label</key><string>选择小窗 App</string>
+            <key>action</key><string>showAppPicker</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSButtonCell</string>
             <key>label</key><string>启动 / 重新加载小窗</string>
             <key>action</key><string>activateSplitWindow</string>
         </dict>
         <dict>
             <key>cell</key><string>PSGroupCell</string>
-            <key>footerText</key><string>当前固定使用 Calculator / Notes。启用后右侧会出现可见把手和悬浮按钮；右侧把手向左滑打开 App 面板。</string>
+            <key>footerText</key><string>先在“选择小窗 App”里勾选需要的小窗应用。启用后右侧会出现把手和悬浮按钮；右侧把手向左滑打开 App 面板。</string>
         </dict>
     </array>
 </dict>

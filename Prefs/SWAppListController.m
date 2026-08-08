@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <dlfcn.h>
 #import <objc/message.h>
 
@@ -8,6 +9,7 @@ static NSString * const SWNotification = @"com.dream.splitwindow/preferencesChan
 @interface SWAppEntry : NSObject
 @property (nonatomic, copy) NSString *bundleIdentifier;
 @property (nonatomic, copy) NSString *displayName;
+@property (nonatomic, strong) UIImage *icon;
 @end
 @implementation SWAppEntry
 @end
@@ -18,6 +20,24 @@ static NSString * const SWNotification = @"com.dream.splitwindow/preferencesChan
 @end
 
 @implementation SWAppListController
+
+- (UIImage *)iconForBundleIdentifier:(NSString *)bundleIdentifier {
+    if (bundleIdentifier.length == 0) return nil;
+    SEL selector = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
+    if (![UIImage respondsToSelector:selector]) return nil;
+    UIImage *image = ((id (*)(id, SEL, id, NSInteger, CGFloat))objc_msgSend)(UIImage.class,
+                                                                             selector,
+                                                                             bundleIdentifier,
+                                                                             10,
+                                                                             UIScreen.mainScreen.scale);
+    if (![image isKindOfClass:[UIImage class]]) return nil;
+    CGSize size = CGSizeMake(34.0, 34.0);
+    UIGraphicsBeginImageContextWithOptions(size, NO, UIScreen.mainScreen.scale);
+    [image drawInRect:(CGRect){CGPointZero, size}];
+    UIImage *scaled = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return [scaled imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+}
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -74,6 +94,7 @@ static NSString * const SWNotification = @"com.dream.splitwindow/preferencesChan
         SWAppEntry *entry = [SWAppEntry new];
         entry.bundleIdentifier = bundleID;
         entry.displayName = name;
+        entry.icon = [self iconForBundleIdentifier:bundleID];
         [entries addObject:entry];
     }
 
@@ -107,6 +128,9 @@ static NSString * const SWNotification = @"com.dream.splitwindow/preferencesChan
     cell.textLabel.text = entry.displayName;
     cell.detailTextLabel.text = entry.bundleIdentifier;
     cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+    cell.imageView.image = entry.icon;
+    cell.imageView.layer.cornerRadius = 9.0;
+    cell.imageView.layer.masksToBounds = YES;
     cell.accessoryType = [self.selected containsObject:entry.bundleIdentifier] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
     return cell;
 }
