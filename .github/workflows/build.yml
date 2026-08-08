@@ -145,6 +145,10 @@ jobs:
           strings "$FEATURE" | grep -q 'SCENE-SYSTEM found'
           strings "$FEATURE" | grep -q 'HOST warm-suspend'
           strings "$FEATURE" | grep -q 'DismissRequiresDoubleTap'
+          strings "$FEATURE" | grep -q '_frontMostAppOrientation'
+          strings "$FEATURE" | grep -q 'SCENE-CREATE default success'
+          strings "$FEATURE" | grep -q 'fallback=default-owned'
+          strings "$FEATURE" | grep -q 'UISupportedInterfaceOrientations~iphone'
           plutil -p "$PREF_ENTRY" | grep -q 'SplitWindow.png'
           echo "--- Filter plist ---"
           plutil -p "$PLIST"
@@ -166,7 +170,7 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: SplitWindow-v0.5.2-RootHide
+          name: SplitWindow-v0.5.3-RootHide
           path: |
             packages/*.deb
             packages/BUILD-VERIFICATION.txt

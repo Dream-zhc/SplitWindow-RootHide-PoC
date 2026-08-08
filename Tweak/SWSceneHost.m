@@ -48,6 +48,11 @@ static void SWVoidCGRect(id obj, SEL sel, CGRect value) {
     ((void (*)(id, SEL, CGRect))objc_msgSend)(obj, sel, value);
 }
 
+static void SWVoidInsets(id obj, SEL sel, UIEdgeInsets value) {
+    if (!obj || ![obj respondsToSelector:sel]) return;
+    ((void (*)(id, SEL, UIEdgeInsets))objc_msgSend)(obj, sel, value);
+}
+
 static int SWInt0(id obj, SEL sel) {
     if (!obj || ![obj respondsToSelector:sel]) return 0;
     return ((int (*)(id, SEL))objc_msgSend)(obj, sel);
@@ -211,13 +216,27 @@ static int SWInt0(id obj, SEL sel) {
 }
 
 - (UIInterfaceOrientation)currentInterfaceOrientation {
+    id springBoard = UIApplication.sharedApplication;
+    SEL frontMostSelector = NSSelectorFromString(@"_frontMostAppOrientation");
+    if ([springBoard respondsToSelector:frontMostSelector]) {
+        NSInteger value = ((NSInteger (*)(id, SEL))objc_msgSend)(springBoard, frontMostSelector);
+        if (value >= UIInterfaceOrientationPortrait && value <= UIInterfaceOrientationLandscapeRight) {
+            return (UIInterfaceOrientation)value;
+        }
+    }
     if (@available(iOS 13.0, *)) {
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             UIWindowScene *windowScene = (UIWindowScene *)scene;
+            NSString *persistentIdentifier = windowScene.session.persistentIdentifier ?: @"";
+            NSString *className = NSStringFromClass(windowScene.class);
+            if (![persistentIdentifier isEqualToString:@"com.apple.springboard"] &&
+                ![className isEqualToString:@"SBWindowScene"]) continue;
             if (scene.activationState == UISceneActivationStateForegroundActive ||
                 scene.activationState == UISceneActivationStateForegroundInactive) {
-                return windowScene.interfaceOrientation;
+                if (windowScene.interfaceOrientation != UIInterfaceOrientationUnknown) {
+                    return windowScene.interfaceOrientation;
+                }
             }
         }
     }
@@ -284,9 +303,25 @@ static int SWInt0(id obj, SEL sel) {
         return nil;
     }
 
-    NSString *sceneIdentifier = [NSString stringWithFormat:@"sceneID:com.dream.splitwindow.%@.%@",
-                                 bundleIdentifier,
-                                 NSUUID.UUID.UUIDString];
+    // Use the application's canonical/default scene identity. FrontBoardAppLauncher
+    // style random secondary scene identities can render an empty surface for
+    // apps which effectively support only their default scene (WeChat is one of
+    // the important cases we need to handle here).
+    id generatedIdentifier = SWMsg1(sceneManager,
+                                    NSSelectorFromString(@"_createSceneIdentifierForApplicationID:"),
+                                    bundleIdentifier);
+    NSString *sceneIdentifier = ([generatedIdentifier isKindOfClass:[NSString class]] &&
+                                 [generatedIdentifier length] > 0)
+        ? generatedIdentifier
+        : [NSString stringWithFormat:@"sceneID:%@-default", bundleIdentifier];
+
+    id racedScene = SWMsg1(sceneManager, NSSelectorFromString(@"sceneWithIdentifier:"), sceneIdentifier);
+    if ([self isSceneUsable:racedScene]) {
+        self.sceneIdentifier = sceneIdentifier;
+        self.ownsScene = NO;
+        SWFileLog(@"SCENE-DEFAULT raced %@ id=%@ scene=%@", bundleIdentifier, sceneIdentifier, racedScene);
+        return racedScene;
+    }
     id definition = SWMsg0(definitionClass, NSSelectorFromString(@"definition"));
     id sceneIdentity = SWMsg1(sceneIdentityClass, NSSelectorFromString(@"identityForIdentifier:"), sceneIdentifier);
     id clientIdentity = SWMsg1(clientIdentityClass,
@@ -307,18 +342,16 @@ static int SWInt0(id obj, SEL sel) {
     SWVoid1(definition, NSSelectorFromString(@"setClientIdentity:"), clientIdentity);
     SWVoid1(definition, NSSelectorFromString(@"setSpecification:"), specification);
 
-    UIInterfaceOrientation orientation = [self currentInterfaceOrientation];
     id displayConfiguration = SWMsg0(UIScreen.mainScreen, NSSelectorFromString(@"displayConfiguration"));
     NSString *persistenceIdentifier = NSUUID.UUID.UUIDString;
     void (^updateSettings)(id) = ^(id targetSettings) {
         SWVoidBool(targetSettings, NSSelectorFromString(@"setCanShowAlerts:"), YES);
         SWVoidBool(targetSettings, NSSelectorFromString(@"setForeground:"), YES);
-        SWVoidCGRect(targetSettings, NSSelectorFromString(@"setFrame:"), UIScreen.mainScreen.bounds);
-        SWVoidInteger(targetSettings, NSSelectorFromString(@"setInterfaceOrientation:"), orientation);
-        SWVoidInteger(targetSettings, NSSelectorFromString(@"setDeviceOrientation:"), UIDevice.currentDevice.orientation);
         SWVoidInteger(targetSettings, NSSelectorFromString(@"setLevel:"), 1);
         SWVoid1(targetSettings, NSSelectorFromString(@"setPersistenceIdentifier:"), persistenceIdentifier);
         SWVoidBool(targetSettings, NSSelectorFromString(@"setStatusBarDisabled:"), YES);
+        SWVoidInsets(targetSettings, NSSelectorFromString(@"setPeripheryInsets:"), UIEdgeInsetsZero);
+        SWVoidInsets(targetSettings, NSSelectorFromString(@"setSafeAreaInsetsPortrait:"), UIEdgeInsetsZero);
         if (displayConfiguration) {
             SWVoid1(targetSettings, NSSelectorFromString(@"setDisplayConfiguration:"), displayConfiguration);
         }
@@ -334,7 +367,11 @@ static int SWInt0(id obj, SEL sel) {
     }
 
     void (^updateClientSettings)(id) = ^(id targetClientSettings) {
-        SWVoidInteger(targetClientSettings, NSSelectorFromString(@"setInterfaceOrientation:"), orientation);
+        // Match the proven legacy FrontBoard hosting sequence: establish the
+        // scene in portrait first, then push the real geometry/orientation once
+        // the presentation view is attached. Some single-scene apps fail to
+        // build content when arbitrary frame/orientation is supplied too early.
+        SWVoidInteger(targetClientSettings, NSSelectorFromString(@"setInterfaceOrientation:"), UIInterfaceOrientationPortrait);
         SWVoidInteger(targetClientSettings, NSSelectorFromString(@"setStatusBarStyle:"), 0);
     };
     SEL updateClientSettingsSelector = NSSelectorFromString(@"updateClientSettingsWithBlock:");
@@ -347,7 +384,7 @@ static int SWInt0(id obj, SEL sel) {
     }
 
     BOOL registered = [self registerProcessHandleIfPossible:processHandle];
-    SWFileLog(@"SCENE-CREATE %@ pid=%d registered=%d id=%@",
+    SWFileLog(@"SCENE-CREATE default %@ pid=%d registered=%d id=%@",
               bundleIdentifier,
               SWInt0(processHandle, NSSelectorFromString(@"pid")),
               registered,
@@ -367,6 +404,13 @@ static int SWInt0(id obj, SEL sel) {
         return nil;
     }
     if (!scene) {
+        id raced = SWMsg1(sceneManager, NSSelectorFromString(@"sceneWithIdentifier:"), sceneIdentifier);
+        if ([self isSceneUsable:raced]) {
+            self.sceneIdentifier = sceneIdentifier;
+            self.ownsScene = NO;
+            SWFileLog(@"SCENE-DEFAULT won-race %@ id=%@ scene=%@", bundleIdentifier, sceneIdentifier, raced);
+            return raced;
+        }
         if (errorOut) *errorOut = [NSError errorWithDomain:@"com.dream.splitwindow"
                                                        code:24
                                                    userInfo:@{NSLocalizedDescriptionKey:@"FrontBoard did not create the requested scene."}];
@@ -375,7 +419,7 @@ static int SWInt0(id obj, SEL sel) {
 
     self.sceneIdentifier = sceneIdentifier;
     self.ownsScene = YES;
-    SWFileLog(@"SCENE-CREATE success %@ scene=%@", bundleIdentifier, scene);
+    SWFileLog(@"SCENE-CREATE default success %@ scene=%@", bundleIdentifier, scene);
     return scene;
 }
 
@@ -560,7 +604,7 @@ static int SWInt0(id obj, SEL sel) {
     }
 
     if (attempt >= maxAttempts) {
-        SWFileLog(@"SCENE-SYSTEM miss %@ after=%lums fallback=owned",
+        SWFileLog(@"SCENE-SYSTEM miss %@ after=%lums fallback=default-owned",
                   bundleIdentifier,
                   (unsigned long)(maxAttempts * 50));
         [self finishOpenForProcessHandle:processHandle generation:generation completion:completion];
@@ -619,7 +663,7 @@ static int SWInt0(id obj, SEL sel) {
                                    processHandle:handle
                                       generation:generation
                                          attempt:0
-                                     maxAttempts:24
+                                     maxAttempts:2
                                       completion:completion];
         return;
     }
@@ -676,7 +720,7 @@ static int SWInt0(id obj, SEL sel) {
                                    processHandle:handle
                                       generation:generation
                                          attempt:0
-                                     maxAttempts:6
+                                     maxAttempts:2
                                       completion:completion];
         return;
     }

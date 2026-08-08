@@ -4,6 +4,7 @@
 #import "SWLogger.h"
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
+#import <dlfcn.h>
 #import <math.h>
 
 @interface SWAppButton : UIButton
@@ -19,18 +20,18 @@
 @property (nonatomic, strong) UIWindow *panelWindow;
 @property (nonatomic, strong) UIWindow *backdropWindow;
 @property (nonatomic, strong) UIWindow *hostWindow;
-@property (nonatomic, strong) UIView *titleBar;
 @property (nonatomic, strong) UIView *sceneClipView;
 @property (nonatomic, strong) UIView *hostedView;
 @property (nonatomic, strong) UIView *resizeHandle;
 @property (nonatomic, strong) UIActivityIndicatorView *loadingIndicator;
 @property (nonatomic, strong) SWSceneHost *sceneHost;
-@property (nonatomic, strong) UILabel *hostTitleLabel;
-@property (nonatomic, strong) UIImageView *hostIconView;
 @property (nonatomic, strong) NSCache<NSString *, UIImage *> *iconCache;
 @property (nonatomic, copy) NSString *panelSignature;
 @property (nonatomic) CGFloat hostScale;
 @property (nonatomic) CGPoint hostNormalizedCenter;
+@property (nonatomic) UIInterfaceOrientation hostContentOrientation;
+@property (nonatomic) UIInterfaceOrientation lastKnownOrientation;
+@property (nonatomic, strong) NSTimer *orientationTimer;
 @end
 
 @implementation SWOverlayController
@@ -44,38 +45,176 @@
 
 - (UIWindowScene *)springBoardWindowScene {
     if (@available(iOS 13.0, *)) {
+        UIWindowScene *fallback = nil;
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             UIWindowScene *windowScene = (UIWindowScene *)scene;
-            if (scene.activationState == UISceneActivationStateForegroundActive ||
-                scene.activationState == UISceneActivationStateForegroundInactive) {
+            if (!(scene.activationState == UISceneActivationStateForegroundActive ||
+                  scene.activationState == UISceneActivationStateForegroundInactive)) continue;
+
+            NSString *className = NSStringFromClass(windowScene.class);
+            NSString *persistentIdentifier = windowScene.session.persistentIdentifier ?: @"";
+            NSString *description = windowScene.description ?: @"";
+
+            // SpringBoard owns several active UIWindowScenes (Dynamic Island /
+            // SystemAperture curtains, transient overlays, etc). Attaching our
+            // windows to those scenes makes coordinate space/orientation wrong.
+            if ([persistentIdentifier isEqualToString:@"com.apple.springboard"] ||
+                [description containsString:@"identifier: com.apple.springboard"] ||
+                ([className isEqualToString:@"SBWindowScene"] &&
+                 ![className containsString:@"Aperture"] &&
+                 ![className containsString:@"Curtain"])) {
                 return windowScene;
             }
+
+            if (!fallback &&
+                ![className containsString:@"SystemAperture"] &&
+                ![className containsString:@"Curtain"] &&
+                ![persistentIdentifier containsString:@"SystemAperture"]) {
+                fallback = windowScene;
+            }
         }
+        return fallback;
     }
     return nil;
 }
 
-- (CGRect)activeScreenBounds {
-    UIWindowScene *scene = [self springBoardWindowScene];
-    if (@available(iOS 13.0, *)) {
-        if (scene && scene.coordinateSpace) return scene.coordinateSpace.bounds;
+- (UIInterfaceOrientation)frontMostInterfaceOrientation {
+    id springBoard = UIApplication.sharedApplication;
+    for (NSString *name in @[@"_frontMostAppOrientation",
+                             @"frontMostAppOrientation",
+                             @"_activeInterfaceOrientation",
+                             @"activeInterfaceOrientation"]) {
+        SEL selector = NSSelectorFromString(name);
+        if (![springBoard respondsToSelector:selector]) continue;
+        NSInteger value = ((NSInteger (*)(id, SEL))objc_msgSend)(springBoard, selector);
+        if (value >= UIInterfaceOrientationPortrait && value <= UIInterfaceOrientationLandscapeRight) {
+            return (UIInterfaceOrientation)value;
+        }
     }
-    return UIScreen.mainScreen.bounds;
+    return UIInterfaceOrientationUnknown;
+}
+
+- (CGRect)activeScreenBounds {
+    CGRect bounds = UIScreen.mainScreen.bounds;
+    UIInterfaceOrientation orientation = [self activeInterfaceOrientation];
+    if (UIInterfaceOrientationIsLandscape(orientation) && CGRectGetHeight(bounds) > CGRectGetWidth(bounds)) {
+        bounds.size = CGSizeMake(CGRectGetHeight(bounds), CGRectGetWidth(bounds));
+    } else if (UIInterfaceOrientationIsPortrait(orientation) && CGRectGetWidth(bounds) > CGRectGetHeight(bounds)) {
+        bounds.size = CGSizeMake(CGRectGetHeight(bounds), CGRectGetWidth(bounds));
+    }
+    bounds.origin = CGPointZero;
+    return bounds;
 }
 
 - (UIInterfaceOrientation)activeInterfaceOrientation {
+    UIInterfaceOrientation frontMost = [self frontMostInterfaceOrientation];
+    if (frontMost != UIInterfaceOrientationUnknown) return frontMost;
     UIWindowScene *scene = [self springBoardWindowScene];
     if (@available(iOS 13.0, *)) {
-        if (scene) return scene.interfaceOrientation;
+        if (scene && scene.interfaceOrientation != UIInterfaceOrientationUnknown) return scene.interfaceOrientation;
     }
-    return UIInterfaceOrientationPortrait;
+    switch (UIDevice.currentDevice.orientation) {
+        case UIDeviceOrientationLandscapeLeft: return UIInterfaceOrientationLandscapeRight;
+        case UIDeviceOrientationLandscapeRight: return UIInterfaceOrientationLandscapeLeft;
+        case UIDeviceOrientationPortraitUpsideDown: return UIInterfaceOrientationPortraitUpsideDown;
+        default: return UIInterfaceOrientationPortrait;
+    }
+}
+
+- (UIInterfaceOrientation)orientationFromInfoString:(NSString *)value {
+    if ([value isEqualToString:@"UIInterfaceOrientationPortrait"]) return UIInterfaceOrientationPortrait;
+    if ([value isEqualToString:@"UIInterfaceOrientationPortraitUpsideDown"]) return UIInterfaceOrientationPortraitUpsideDown;
+    if ([value isEqualToString:@"UIInterfaceOrientationLandscapeLeft"]) return UIInterfaceOrientationLandscapeLeft;
+    if ([value isEqualToString:@"UIInterfaceOrientationLandscapeRight"]) return UIInterfaceOrientationLandscapeRight;
+    return UIInterfaceOrientationUnknown;
+}
+
+- (UIInterfaceOrientation)preferredContentOrientationForBundleIdentifier:(NSString *)bundleIdentifier {
+    NSArray *supported = nil;
+    dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_LAZY);
+    dlopen("/System/Library/PrivateFrameworks/MobileCoreServices.framework/MobileCoreServices", RTLD_LAZY);
+    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+    SEL proxySelector = NSSelectorFromString(@"applicationProxyForIdentifier:");
+    id proxy = nil;
+    if ([proxyClass respondsToSelector:proxySelector]) {
+        proxy = ((id (*)(id, SEL, id))objc_msgSend)(proxyClass, proxySelector, bundleIdentifier);
+    }
+
+    NSURL *bundleURL = nil;
+    @try { bundleURL = [proxy valueForKey:@"bundleURL"]; }
+    @catch (__unused NSException *exception) {}
+    if ([bundleURL isKindOfClass:[NSURL class]]) {
+        NSBundle *bundle = [NSBundle bundleWithURL:bundleURL];
+        NSDictionary *info = bundle.infoDictionary;
+        id value = info[@"UISupportedInterfaceOrientations~iphone"] ?: info[@"UISupportedInterfaceOrientations"];
+        if ([value isKindOfClass:[NSArray class]]) supported = value;
+    }
+
+    if (supported.count == 0) return [self activeInterfaceOrientation];
+
+    NSMutableSet<NSNumber *> *values = [NSMutableSet set];
+    for (id item in supported) {
+        if (![item isKindOfClass:[NSString class]]) continue;
+        UIInterfaceOrientation orientation = [self orientationFromInfoString:item];
+        if (orientation != UIInterfaceOrientationUnknown) [values addObject:@(orientation)];
+    }
+
+    UIInterfaceOrientation active = [self activeInterfaceOrientation];
+    if ([values containsObject:@(active)]) return active;
+
+    BOOL supportsPortrait = [values containsObject:@(UIInterfaceOrientationPortrait)] ||
+                            [values containsObject:@(UIInterfaceOrientationPortraitUpsideDown)];
+    BOOL supportsLandscape = [values containsObject:@(UIInterfaceOrientationLandscapeLeft)] ||
+                             [values containsObject:@(UIInterfaceOrientationLandscapeRight)];
+    if (supportsLandscape && !supportsPortrait) {
+        UIDeviceOrientation device = UIDevice.currentDevice.orientation;
+        if (device == UIDeviceOrientationLandscapeLeft && [values containsObject:@(UIInterfaceOrientationLandscapeRight)]) {
+            return UIInterfaceOrientationLandscapeRight;
+        }
+        if (device == UIDeviceOrientationLandscapeRight && [values containsObject:@(UIInterfaceOrientationLandscapeLeft)]) {
+            return UIInterfaceOrientationLandscapeLeft;
+        }
+        if ([values containsObject:@(UIInterfaceOrientationLandscapeRight)]) return UIInterfaceOrientationLandscapeRight;
+        return UIInterfaceOrientationLandscapeLeft;
+    }
+    if (supportsPortrait) return UIInterfaceOrientationPortrait;
+
+    UIInterfaceOrientation fallback = [self orientationFromInfoString:supported.firstObject];
+    return fallback == UIInterfaceOrientationUnknown ? active : fallback;
+}
+
+- (CGRect)hostContentBounds {
+    CGRect bounds = UIScreen.mainScreen.bounds;
+    UIInterfaceOrientation orientation = self.hostContentOrientation;
+    if (orientation == UIInterfaceOrientationUnknown) orientation = [self activeInterfaceOrientation];
+    if (UIInterfaceOrientationIsLandscape(orientation) && CGRectGetHeight(bounds) > CGRectGetWidth(bounds)) {
+        bounds.size = CGSizeMake(CGRectGetHeight(bounds), CGRectGetWidth(bounds));
+    } else if (UIInterfaceOrientationIsPortrait(orientation) && CGRectGetWidth(bounds) > CGRectGetHeight(bounds)) {
+        bounds.size = CGSizeMake(CGRectGetHeight(bounds), CGRectGetWidth(bounds));
+    }
+    bounds.origin = CGPointZero;
+    return bounds;
 }
 
 - (void)deviceOrientationDidChange:(__unused NSNotification *)notification {
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self layoutOverlayWindowsForCurrentOrientation];
+        [self updateOrientationIfNeeded];
     });
+}
+
+- (void)orientationTimerFired:(__unused NSTimer *)timer {
+    [self updateOrientationIfNeeded];
+}
+
+- (void)updateOrientationIfNeeded {
+    UIInterfaceOrientation orientation = [self activeInterfaceOrientation];
+    if (orientation == UIInterfaceOrientationUnknown || orientation == self.lastKnownOrientation) return;
+    self.lastKnownOrientation = orientation;
+    if (self.sceneHost.bundleIdentifier.length > 0) {
+        self.hostContentOrientation = [self preferredContentOrientationForBundleIdentifier:self.sceneHost.bundleIdentifier];
+    }
+    [self layoutOverlayWindowsForCurrentOrientation];
 }
 
 - (void)layoutOverlayWindowsForCurrentOrientation {
@@ -105,7 +244,10 @@
     if (self.panelWindow && !self.panelWindow.hidden) [self rebuildPanel];
     if (self.hostWindow && !self.hostWindow.hidden) {
         [self layoutHostWindowAnimated:NO];
-        [self.sceneHost updateSceneForHostBounds:screen interfaceOrientation:[self activeInterfaceOrientation]];
+        UIInterfaceOrientation contentOrientation = self.hostContentOrientation;
+        if (contentOrientation == UIInterfaceOrientationUnknown) contentOrientation = [self activeInterfaceOrientation];
+        [self.sceneHost updateSceneForHostBounds:[self hostContentBounds]
+                            interfaceOrientation:contentOrientation];
     }
     SWFileLog(@"UI rotation layout orientation=%ld bounds=%@",
               (long)[self activeInterfaceOrientation],
@@ -138,6 +280,7 @@
     self.iconCache.countLimit = 64;
     self.hostScale = (CGFloat)[SWPreferences windowScale];
     self.hostNormalizedCenter = CGPointMake(0.5, 0.5);
+    self.lastKnownOrientation = [self activeInterfaceOrientation];
     [UIDevice.currentDevice beginGeneratingDeviceOrientationNotifications];
     [NSNotificationCenter.defaultCenter addObserver:self
                                            selector:@selector(deviceOrientationDidChange:)
@@ -147,6 +290,11 @@
                                            selector:@selector(deviceOrientationDidChange:)
                                                name:UIApplicationDidChangeStatusBarOrientationNotification
                                              object:nil];
+    self.orientationTimer = [NSTimer scheduledTimerWithTimeInterval:0.20
+                                                             target:self
+                                                           selector:@selector(orientationTimerFired:)
+                                                           userInfo:nil
+                                                            repeats:YES];
     SWFileLog(@"START-2 building edge window");
     [self buildEdgeWindow];
     if (!self.edgeWindow) {
@@ -409,6 +557,8 @@
 
 - (void)openBundleIdentifier:(NSString *)bundleIdentifier {
     SWFileLog(@"OPEN request %@", bundleIdentifier);
+    self.hostContentOrientation = [self preferredContentOrientationForBundleIdentifier:bundleIdentifier];
+    SWFileLog(@"OPEN content orientation %@=%ld", bundleIdentifier, (long)self.hostContentOrientation);
     [self prepareHostWindowForBundleIdentifier:bundleIdentifier];
     if (!self.hostWindow) {
         [self showFailureBubble:@"Could not create the SplitWindow host window."];
@@ -430,25 +580,28 @@
 }
 
 - (CGFloat)hostTitleHeight {
-    return 34.0;
+    return 0.0;
 }
 
 - (CGFloat)clampedHostScale:(CGFloat)scale {
     CGRect screen = [self activeScreenBounds];
+    CGRect content = [self hostContentBounds];
     CGFloat titleHeight = [self hostTitleHeight];
-    CGFloat maxWidthScale = (CGRectGetWidth(screen) - 16.0) / MAX(1.0, CGRectGetWidth(screen));
-    CGFloat maxHeightScale = (CGRectGetHeight(screen) - titleHeight - 24.0) / MAX(1.0, CGRectGetHeight(screen));
+    CGFloat maxWidthScale = (CGRectGetWidth(screen) - 16.0) / MAX(1.0, CGRectGetWidth(content));
+    CGFloat maxHeightScale = (CGRectGetHeight(screen) - titleHeight - 24.0) / MAX(1.0, CGRectGetHeight(content));
     CGFloat maximum = MIN(0.95, MIN(maxWidthScale, maxHeightScale));
-    maximum = MAX(0.52, maximum);
-    return MAX(0.42, MIN(scale, maximum));
+    maximum = MAX(0.28, maximum);
+    CGFloat minimum = MIN(0.42, maximum);
+    return MAX(minimum, MIN(scale, maximum));
 }
 
 - (CGRect)hostFrameForCurrentScale {
     CGRect screen = [self activeScreenBounds];
+    CGRect content = [self hostContentBounds];
     self.hostScale = [self clampedHostScale:self.hostScale];
     CGFloat titleHeight = [self hostTitleHeight];
-    CGFloat width = floor(CGRectGetWidth(screen) * self.hostScale);
-    CGFloat contentHeight = floor(CGRectGetHeight(screen) * self.hostScale);
+    CGFloat width = floor(CGRectGetWidth(content) * self.hostScale);
+    CGFloat contentHeight = floor(CGRectGetHeight(content) * self.hostScale);
     CGFloat height = contentHeight + titleHeight;
 
     CGPoint normalized = self.hostNormalizedCenter;
@@ -502,22 +655,13 @@
         root.layer.borderWidth = 0.5;
         root.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
 
-        self.titleBar = [UIView new];
-        self.titleBar.backgroundColor = [UIColor colorWithWhite:0.07 alpha:0.98];
-        [root addSubview:self.titleBar];
+        // No title/status bar. A two-finger pan anywhere on the small window
+        // moves it without stealing normal single-finger interaction from the app.
         UIPanGestureRecognizer *drag = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragHostWindow:)];
-        [self.titleBar addGestureRecognizer:drag];
-
-        self.hostIconView = [UIImageView new];
-        self.hostIconView.contentMode = UIViewContentModeScaleAspectFit;
-        self.hostIconView.layer.cornerRadius = 5.0;
-        self.hostIconView.layer.masksToBounds = YES;
-        [self.titleBar addSubview:self.hostIconView];
-
-        self.hostTitleLabel = [UILabel new];
-        self.hostTitleLabel.textColor = UIColor.whiteColor;
-        self.hostTitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-        [self.titleBar addSubview:self.hostTitleLabel];
+        drag.minimumNumberOfTouches = 2;
+        drag.maximumNumberOfTouches = 2;
+        drag.cancelsTouchesInView = NO;
+        [root addGestureRecognizer:drag];
 
         self.sceneClipView = [UIView new];
         self.sceneClipView.backgroundColor = [UIColor colorWithWhite:0.02 alpha:1.0];
@@ -542,8 +686,6 @@
 
     [self.hostedView removeFromSuperview];
     self.hostedView = nil;
-    self.hostIconView.image = [self iconForBundleIdentifier:bundleIdentifier];
-    self.hostTitleLabel.text = [self displayNameForBundleIdentifier:bundleIdentifier];
     [self.loadingIndicator startAnimating];
     [self layoutHostWindowAnimated:NO];
     self.backdropWindow.hidden = NO;
@@ -561,13 +703,16 @@
     [self.sceneClipView insertSubview:hostedView atIndex:0];
     [self layoutHostWindowAnimated:NO];
 
-    CGRect screen = [self activeScreenBounds];
-    UIInterfaceOrientation orientation = [self activeInterfaceOrientation];
-    [self.sceneHost updateSceneForHostBounds:screen interfaceOrientation:orientation];
+    CGRect contentBounds = [self hostContentBounds];
+    UIInterfaceOrientation orientation = self.hostContentOrientation;
+    if (orientation == UIInterfaceOrientationUnknown) orientation = [self activeInterfaceOrientation];
+    [self.sceneHost updateSceneForHostBounds:contentBounds interfaceOrientation:orientation];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (self.hostedView == hostedView) {
-            [self.sceneHost updateSceneForHostBounds:[self activeScreenBounds]
-                                interfaceOrientation:[self activeInterfaceOrientation]];
+            UIInterfaceOrientation delayedOrientation = self.hostContentOrientation;
+            if (delayedOrientation == UIInterfaceOrientationUnknown) delayedOrientation = [self activeInterfaceOrientation];
+            [self.sceneHost updateSceneForHostBounds:[self hostContentBounds]
+                                interfaceOrientation:delayedOrientation];
             [self.loadingIndicator stopAnimating];
         }
     });
@@ -576,24 +721,20 @@
 
 - (void)layoutHostWindowAnimated:(BOOL)animated {
     if (!self.hostWindow) return;
-    CGRect screen = [self activeScreenBounds];
+    CGRect content = [self hostContentBounds];
     CGRect frame = [self hostFrameForCurrentScale];
     CGFloat titleHeight = [self hostTitleHeight];
     CGFloat contentWidth = CGRectGetWidth(frame);
     CGFloat contentHeight = CGRectGetHeight(frame) - titleHeight;
     void (^layoutBlock)(void) = ^{
         self.hostWindow.frame = frame;
-        self.titleBar.frame = CGRectMake(0, 0, contentWidth, titleHeight);
-        self.hostIconView.frame = CGRectMake(10, 6, 22, 22);
-        CGFloat titleX = self.hostIconView.image ? 39.0 : 13.0;
-        self.hostTitleLabel.frame = CGRectMake(titleX, 0, MAX(20.0, contentWidth - titleX - 12.0), titleHeight);
         self.sceneClipView.frame = CGRectMake(0, titleHeight, contentWidth, contentHeight);
         self.loadingIndicator.center = CGPointMake(contentWidth * 0.5, contentHeight * 0.5);
         self.resizeHandle.frame = CGRectMake(MAX(0.0, contentWidth - 34.0), MAX(titleHeight, CGRectGetHeight(frame) - 34.0), 34.0, 34.0);
         UIImageView *resizeIcon = [self.resizeHandle viewWithTag:991];
         resizeIcon.frame = CGRectMake(9, 9, 16, 16);
         if (self.hostedView) {
-            self.hostedView.bounds = CGRectMake(0, 0, CGRectGetWidth(screen), CGRectGetHeight(screen));
+            self.hostedView.bounds = content;
             self.hostedView.layer.anchorPoint = CGPointZero;
             self.hostedView.layer.position = CGPointZero;
             self.hostedView.transform = CGAffineTransformMakeScale(self.hostScale, self.hostScale);
@@ -656,12 +797,9 @@
     self.hostWindow = nil;
     self.backdropWindow.rootViewController = nil;
     self.backdropWindow = nil;
-    self.titleBar = nil;
     self.sceneClipView = nil;
     self.resizeHandle = nil;
     self.loadingIndicator = nil;
-    self.hostTitleLabel = nil;
-    self.hostIconView = nil;
 }
 
 - (void)showFailureBubble:(NSString *)message {
