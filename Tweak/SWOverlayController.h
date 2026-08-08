@@ -6,6 +6,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (instancetype)sharedInstance;
 - (void)start;
 - (void)reloadPreferences;
+- (void)setSystemLocked:(BOOL)locked;
 - (void)frontDisplayDidChange:(nullable id)newDisplay;
 @end
 

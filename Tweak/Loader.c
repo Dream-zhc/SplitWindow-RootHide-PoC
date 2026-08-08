@@ -17,12 +17,14 @@
 
 static const CFStringRef SWActivationNotification = CFSTR("com.dream.splitwindow/activationRequested");
 static const CFStringRef SWPreferencesNotification = CFSTR("com.dream.splitwindow/preferencesChanged");
+static const CFStringRef SWLockStateNotification = CFSTR("com.apple.springboard.lockstate");
 
 typedef void (*SWFeatureFunction)(void);
 
 static void *SWFeatureHandle = NULL;
 static SWFeatureFunction SWFeatureStartFunction = NULL;
 static SWFeatureFunction SWFeatureReloadFunction = NULL;
+static bool SWBootStable = false;
 
 static void SWLoaderInitialize(void);
 
@@ -121,6 +123,19 @@ static void SWHandleActivationOnMain(void *context) {
     SWFeatureStartFunction();
 }
 
+static void SWHandleAutomaticActivationOnMain(void *context) {
+    (void)context;
+    SWLoaderLog("AUTO activation probe");
+    if (!SWLoadFeatureIfNeeded()) {
+        SWLoaderLog("AUTO feature load failed");
+        return;
+    }
+    // Feature-side code decides whether SpringBoard is currently locked. The
+    // loader deliberately remains pure C and does not touch UIKit/private
+    // Objective-C state during bootstrap.
+    SWFeatureStartFunction();
+}
+
 static void SWHandlePreferencesOnMain(void *context) {
     (void)context;
     if (SWFeatureReloadFunction) SWFeatureReloadFunction();
@@ -154,9 +169,32 @@ static void SWPreferencesChanged(CFNotificationCenterRef center,
     dispatch_async_f(dispatch_get_main_queue(), NULL, SWHandlePreferencesOnMain);
 }
 
+static void SWLockStateChanged(CFNotificationCenterRef center,
+                               void *observer,
+                               CFStringRef name,
+                               const void *object,
+                               CFDictionaryRef userInfo) {
+    (void)center;
+    (void)observer;
+    (void)name;
+    (void)object;
+    (void)userInfo;
+    SWLoaderLog("NOTIFY lockstate received");
+    if (!SWBootStable) {
+        SWLoaderLog("AUTO lockstate deferred until SpringBoard stable");
+        return;
+    }
+    dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(350 * NSEC_PER_MSEC)),
+                     dispatch_get_main_queue(),
+                     NULL,
+                     SWHandleAutomaticActivationOnMain);
+}
+
 static void SWWriteBootMarker(void *context) {
     (void)context;
+    SWBootStable = true;
     SWLoaderLog("BOOT loader alive after 8s");
+    SWHandleAutomaticActivationOnMain(NULL);
 }
 
 __attribute__((constructor))
@@ -174,6 +212,12 @@ static void SWLoaderInitialize(void) {
                                     NULL,
                                     SWPreferencesChanged,
                                     SWPreferencesNotification,
+                                    NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(center,
+                                    NULL,
+                                    SWLockStateChanged,
+                                    SWLockStateNotification,
                                     NULL,
                                     CFNotificationSuspensionBehaviorDeliverImmediately);
 

@@ -115,6 +115,8 @@ jobs:
             exit 1
           fi
           strings "$DYLIB" | grep -q 'BOOT loader alive after 8s'
+          strings "$DYLIB" | grep -q 'AUTO activation probe'
+          strings "$DYLIB" | grep -q 'com.apple.springboard.lockstate'
           echo "--- Feature Mach-O ---"
           file "$FEATURE"
           FEATURE_SLICES="$(lipo -archs "$FEATURE")"
@@ -133,7 +135,7 @@ jobs:
               exit 1
             fi
           }
-          require_string "$FEATURE_STRINGS" 'START v0.6.1 overlay ready'
+          require_string "$FEATURE_STRINGS" 'START v0.6.2 overlay ready'
           echo "--- Preferences bundle ---"
           PREFS_BIN="$PREFS/SplitWindowPrefs"
           test -f "$PREFS_BIN"
@@ -157,11 +159,18 @@ jobs:
           require_string "$FEATURE_STRINGS" 'FBSystemServiceOpenApplicationRequest'
           require_string "$FEATURE_STRINGS" '__ActivateSuspended'
           require_string "$FEATURE_STRINGS" 'SYSTEM-OPEN request'
+          require_string "$FEATURE_STRINGS" 'FBSOpenApplicationService'
+          require_string "$FEATURE_STRINGS" 'FBSOpenApplicationOptionKeyLSSequenceNumber'
           require_string "$FEATURE_STRINGS" 'STATE backgrounded'
           require_string "$FEATURE_STRINGS" 'STATE relinquish-fullscreen'
           require_string "$FEATURE_STRINGS" 'HANDOFF foreground-self'
           require_string "$FEATURE_STRINGS" 'PERF visible'
+          require_string "$FEATURE_STRINGS" 'LAUNCH native-surface armed'
           require_string "$FEATURE_STRINGS" 'TOUCH shield dismiss'
+          require_string "$FEATURE_STRINGS" 'TOUCH focus acquire'
+          require_string "$FEATURE_STRINGS" 'HANDLE touch-began local-ownership'
+          require_string "$FEATURE_STRINGS" 'LOCK first-unlock overlay visible'
+          require_string "$FEATURE_STRINGS" 'HANDOFF foreground released-stale-process'
           require_string "$FEATURE_STRINGS" 'HOOK frontDisplayDidChange installed'
           require_string "$FEATURE_STRINGS" 'HANDLE snap side='
           require_string "$FEATURE_STRINGS" 'PANEL show side='
@@ -194,7 +203,7 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: SplitWindow-v0.6.1-RootHide
+          name: SplitWindow-v0.6.2-RootHide
           path: |
             packages/*.deb
             packages/BUILD-VERIFICATION.txt

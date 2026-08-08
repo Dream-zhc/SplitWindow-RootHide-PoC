@@ -1,5 +1,6 @@
 #import "SWSceneHost.h"
 #import "SWLogger.h"
+#import <dlfcn.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 
@@ -53,6 +54,23 @@ static BOOL SWBool0(id obj, SEL sel) {
     NSMethodSignature *signature = [obj methodSignatureForSelector:sel];
     if (!signature || signature.numberOfArguments != 2 || signature.methodReturnLength != sizeof(BOOL)) return NO;
     return ((BOOL (*)(id, SEL))objc_msgSend)(obj, sel);
+}
+
+static NSUInteger SWUInteger0(id obj, SEL sel) {
+    if (!obj || ![obj respondsToSelector:sel]) return 0;
+    NSMethodSignature *signature = [obj methodSignatureForSelector:sel];
+    if (!signature || signature.numberOfArguments != 2 ||
+        signature.methodReturnLength != sizeof(NSUInteger)) return 0;
+    return ((NSUInteger (*)(id, SEL))objc_msgSend)(obj, sel);
+}
+
+static NSString *SWGlobalStringConstant(const char *symbolName) {
+    if (!symbolName) return nil;
+    void *symbol = dlsym(RTLD_DEFAULT, symbolName);
+    if (!symbol) return nil;
+    __unsafe_unretained id *slot = (__unsafe_unretained id *)symbol;
+    id value = slot ? *slot : nil;
+    return [value isKindOfClass:[NSString class]] ? value : nil;
 }
 
 typedef NS_ENUM(NSInteger, SWSceneHostState) {
@@ -169,13 +187,45 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
     return [NSString stringWithFormat:@"sceneID:%@-default", bundleIdentifier];
 }
 
+- (BOOL)scene:(id)scene matchesBundleIdentifier:(NSString *)bundleIdentifier {
+    if (![self isSceneUsable:scene] || bundleIdentifier.length == 0) return NO;
+    for (NSString *selectorName in @[@"identifier", @"sceneIdentifier", @"persistenceIdentifier"]) {
+        id value = SWMsg0(scene, NSSelectorFromString(selectorName));
+        if ([[value description] containsString:bundleIdentifier]) return YES;
+    }
+    id identity = SWMsg0(scene, NSSelectorFromString(@"identity"));
+    for (NSString *selectorName in @[@"identifier", @"stringRepresentation"]) {
+        id value = SWMsg0(identity, NSSelectorFromString(selectorName));
+        if ([[value description] containsString:bundleIdentifier]) return YES;
+    }
+    return [[scene description] containsString:bundleIdentifier];
+}
+
+- (id)sceneFromCollection:(id)collection bundleIdentifier:(NSString *)bundleIdentifier {
+    if ([collection isKindOfClass:[NSDictionary class]]) {
+        for (id key in [collection allKeys]) {
+            id scene = [collection objectForKey:key];
+            if ([self scene:scene matchesBundleIdentifier:bundleIdentifier]) return scene;
+        }
+        return nil;
+    }
+    if ([collection conformsToProtocol:@protocol(NSFastEnumeration)]) {
+        for (id scene in collection) {
+            if ([self scene:scene matchesBundleIdentifier:bundleIdentifier]) return scene;
+        }
+    }
+    return nil;
+}
+
 - (id)systemDefaultSceneForBundleIdentifier:(NSString *)bundleIdentifier matchedIdentifier:(NSString **)matchedIdentifier {
     id application = [self springBoardApplicationForBundleIdentifier:bundleIdentifier];
-    id mainScene = SWMsg0(application, NSSelectorFromString(@"mainScene"));
-    if ([self isSceneUsable:mainScene]) {
-        NSString *identifier = [SWMsg0(mainScene, NSSelectorFromString(@"identifier")) description];
-        if (matchedIdentifier) *matchedIdentifier = identifier;
-        return mainScene;
+    for (NSString *selectorName in @[@"mainScene", @"_mainScene", @"primaryScene", @"scene"]) {
+        id applicationScene = SWMsg0(application, NSSelectorFromString(selectorName));
+        if ([self scene:applicationScene matchesBundleIdentifier:bundleIdentifier]) {
+            NSString *identifier = [SWMsg0(applicationScene, NSSelectorFromString(@"identifier")) description];
+            if (matchedIdentifier) *matchedIdentifier = identifier;
+            return applicationScene;
+        }
     }
 
     id manager = [self sceneManager];
@@ -193,6 +243,35 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
             return scene;
         }
     }
+
+    // Some large legacy/lifecycle-heavy apps do not expose their active Scene
+    // through SBApplication.mainScene even while SpringBoard is displaying it.
+    // Prefer explicit collection selectors if this iOS build provides them.
+    for (NSString *selectorName in @[@"scenes", @"allScenes"]) {
+        id scene = [self sceneFromCollection:SWMsg0(manager, NSSelectorFromString(selectorName))
+                           bundleIdentifier:bundleIdentifier];
+        if (scene) {
+            NSString *identifier = [SWMsg0(scene, NSSelectorFromString(@"identifier")) description];
+            if (matchedIdentifier) *matchedIdentifier = identifier;
+            SWFileLog(@"SCENE-SYSTEM discovered %@ via=%@ id=%@", bundleIdentifier, selectorName, identifier);
+            return scene;
+        }
+    }
+
+    // Last-resort read-only compatibility probe. This never creates, mutates,
+    // or destroys a Scene. KVC is wrapped in @try so an iOS build that hides
+    // the storage simply falls through rather than taking SpringBoard down.
+    @try {
+        id scenesByID = [manager valueForKey:@"_scenesByID"];
+        id scene = [self sceneFromCollection:scenesByID bundleIdentifier:bundleIdentifier];
+        if (scene) {
+            NSString *identifier = [SWMsg0(scene, NSSelectorFromString(@"identifier")) description];
+            if (matchedIdentifier) *matchedIdentifier = identifier;
+            SWFileLog(@"SCENE-SYSTEM discovered %@ via=readonly-kvc id=%@", bundleIdentifier, identifier);
+            return scene;
+        }
+    } @catch (__unused NSException *exception) {
+    }
     return nil;
 }
 
@@ -200,18 +279,65 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
                            activateSuspended:(BOOL)activateSuspended {
     if (bundleIdentifier.length == 0) return NO;
 
-    NSDictionary *optionDictionary = @{
+    NSMutableDictionary *optionDictionary = [@{
         @"__ActivateSuspended": @(activateSuspended),
         @"__Actions": @[],
         @"__PromptUnlockDevice": @YES,
         @"__LaunchOrigin": @"__SBLaunchOriginSplitWindow",
-    };
+    } mutableCopy];
+
+    // LLDB/debugserver includes the LaunchServices generation metadata in its
+    // FBS launch request. Supplying it when the private constants are exported
+    // helps FrontBoard associate a cold request with the current installed app
+    // registration instead of a stale LS generation. All lookups are dynamic;
+    // a build that hides any of these symbols simply skips the optimization.
+    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+    id proxy = SWMsg1(proxyClass, NSSelectorFromString(@"applicationProxyForIdentifier:"), bundleIdentifier);
+    NSUInteger sequenceNumber = SWUInteger0(proxy, NSSelectorFromString(@"sequenceNumber"));
+    id cacheGUID = SWMsg0(proxy, NSSelectorFromString(@"cacheGUID"));
+    NSString *cacheGUIDString = SWMsg0(cacheGUID, NSSelectorFromString(@"UUIDString"));
+    NSString *sequenceKey = SWGlobalStringConstant("FBSOpenApplicationOptionKeyLSSequenceNumber");
+    NSString *cacheGUIDKey = SWGlobalStringConstant("FBSOpenApplicationOptionKeyLSCacheGUID");
+    if (sequenceNumber > 0 && sequenceKey.length > 0) {
+        optionDictionary[sequenceKey] = @(sequenceNumber);
+    }
+    if (cacheGUIDString.length > 0 && cacheGUIDKey.length > 0) {
+        optionDictionary[cacheGUIDKey] = cacheGUIDString;
+    }
+    if (sequenceNumber > 0 || cacheGUIDString.length > 0) {
+        SWFileLog(@"SYSTEM-OPEN LS metadata %@ sequence=%lu guid=%d",
+                  bundleIdentifier,
+                  (unsigned long)sequenceNumber,
+                  cacheGUIDString.length > 0);
+    }
     id options = SWMsg1(NSClassFromString(@"FBSOpenApplicationOptions"),
                         NSSelectorFromString(@"optionsWithDictionary:"),
                         optionDictionary);
     if (!options) {
         SWFileLog(@"SYSTEM-OPEN options unavailable %@", bundleIdentifier);
         return NO;
+    }
+
+    // Prefer the same service-level route used by SpringBoard shortcuts and
+    // debugger suspended activation. It gives FrontBoard ownership of the app
+    // launch transaction from the beginning instead of manually constructing
+    // a Scene or routing through a higher-level workspace shim first.
+    void (^completion)(void) = ^{};
+    Class openServiceClass = NSClassFromString(@"FBSOpenApplicationService");
+    id openService = openServiceClass ? [openServiceClass new] : nil;
+    SEL openSelector = NSSelectorFromString(@"openApplication:withOptions:completion:");
+    NSMethodSignature *openSignature = [openService methodSignatureForSelector:openSelector];
+    if (openService && [openService respondsToSelector:openSelector] &&
+        openSignature && openSignature.numberOfArguments == 5) {
+        ((void (*)(id, SEL, id, id, id))objc_msgSend)(openService,
+                                                       openSelector,
+                                                       bundleIdentifier,
+                                                       options,
+                                                       completion);
+        SWFileLog(@"SYSTEM-OPEN request %@ suspended=%d route=fbs-service",
+                  bundleIdentifier,
+                  activateSuspended);
+        return YES;
     }
 
     Class requestClass = NSClassFromString(@"FBSystemServiceOpenApplicationRequest");
@@ -223,7 +349,6 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
 
     SEL workspaceSelector = NSSelectorFromString(@"systemService:handleOpenApplicationRequest:withCompletion:");
     NSMethodSignature *workspaceSignature = [workspace methodSignatureForSelector:workspaceSelector];
-    void (^completion)(void) = ^{};
     if (request && workspace && systemService &&
         [workspace respondsToSelector:workspaceSelector] &&
         workspaceSignature && workspaceSignature.numberOfArguments == 5) {
@@ -238,23 +363,6 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
                                                        request,
                                                        completion);
         SWFileLog(@"SYSTEM-OPEN request %@ suspended=%d route=workspace",
-                  bundleIdentifier,
-                  activateSuspended);
-        return YES;
-    }
-
-    Class openServiceClass = NSClassFromString(@"FBSOpenApplicationService");
-    id openService = openServiceClass ? [openServiceClass new] : nil;
-    SEL openSelector = NSSelectorFromString(@"openApplication:withOptions:completion:");
-    NSMethodSignature *openSignature = [openService methodSignatureForSelector:openSelector];
-    if (openService && [openService respondsToSelector:openSelector] &&
-        openSignature && openSignature.numberOfArguments == 5) {
-        ((void (*)(id, SEL, id, id, id))objc_msgSend)(openService,
-                                                       openSelector,
-                                                       bundleIdentifier,
-                                                       options,
-                                                       completion);
-        SWFileLog(@"SYSTEM-OPEN request %@ suspended=%d route=fbs-service",
                   bundleIdentifier,
                   activateSuspended);
         return YES;
@@ -481,9 +589,10 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
                                          completion:(SWSceneHostCompletion)completion {
     if (generation != self.openGeneration) return;
     NSString *frontMost = [self frontMostBundleIdentifier];
-    BOOL targetStillForeground = [frontMost isEqualToString:bundleIdentifier] ||
-                                 [self isBundleIdentifierForeground:bundleIdentifier];
-    if (!targetStillForeground) {
+    BOOL frontClaimsTarget = [frontMost isEqualToString:bundleIdentifier];
+    BOOL processClaimsTarget = [self isBundleIdentifierForeground:bundleIdentifier];
+
+    if (!frontClaimsTarget && !processClaimsTarget) {
         SWFileLog(@"HANDOFF foreground released %@ attempts=%lu front=%@",
                   bundleIdentifier,
                   (unsigned long)attempt,
@@ -492,10 +601,25 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
         return;
     }
 
+    // SBApplicationProcessState visibility frequently remains Foreground for a
+    // few hundred milliseconds after Home has already removed the fullscreen
+    // display. Treat that as stale once the front-display source no longer
+    // names the target and the transition has had ~300ms to settle. The v0.6.1
+    // logic waited on stale process visibility and timed out even though Home
+    // was already visible.
+    if (!frontClaimsTarget && attempt >= 18) {
+        SWFileLog(@"HANDOFF foreground released-stale-process %@ attempts=%lu processForeground=%d",
+                  bundleIdentifier,
+                  (unsigned long)attempt,
+                  processClaimsTarget);
+        [self finishOpenForScene:scene generation:generation completion:completion];
+        return;
+    }
+
     // This polling exists only for the foreground-self handoff and normally
     // lasts one or two display frames. It prevents presenting one Scene in the
     // system fullscreen host and SplitWindow at the same time (black surface).
-    if (attempt >= 45) {
+    if (attempt >= 75) {
         SWFileLog(@"HANDOFF foreground release timeout %@ front=%@", bundleIdentifier, frontMost);
         NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow"
                                              code:31
@@ -547,7 +671,7 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
     // does not materialize a Scene for suspended activation, escalate once to
     // a normal system open request and immediately hand that same Scene back
     // from fullscreen before presenting it in the mini-window.
-    if (!escalated && attempt == 24) {
+    if (!escalated && attempt == 48) {
         BOOL requested = [self requestSystemOpenForBundleIdentifier:bundleIdentifier activateSuspended:NO];
         if (!requested) {
             NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow"

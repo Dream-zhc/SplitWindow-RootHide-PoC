@@ -2,9 +2,31 @@
 #import "SWPreferences.h"
 #import "SWLogger.h"
 #import <Foundation/Foundation.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 
 static IMP SWOriginalFrontDisplayDidChange = NULL;
+
+static BOOL SWFeatureIsUILocked(void) {
+    Class managerClass = NSClassFromString(@"SBLockScreenManager");
+    id manager = nil;
+    SEL sharedSelector = NSSelectorFromString(@"sharedInstance");
+    if ([managerClass respondsToSelector:sharedSelector]) {
+        manager = ((id (*)(id, SEL))objc_msgSend)(managerClass, sharedSelector);
+    }
+    if (!manager) return YES;
+
+    for (NSString *selectorName in @[@"isUILocked", @"isLocked", @"isLockScreenVisible"]) {
+        SEL selector = NSSelectorFromString(selectorName);
+        NSMethodSignature *signature = [manager methodSignatureForSelector:selector];
+        if (![manager respondsToSelector:selector] || !signature ||
+            signature.numberOfArguments != 2 || signature.methodReturnLength != sizeof(BOOL)) continue;
+        return ((BOOL (*)(id, SEL))objc_msgSend)(manager, selector);
+    }
+    // Fail closed: if this iOS build exposes none of the expected selectors,
+    // do not construct SpringBoard overlay UI automatically at lock screen.
+    return YES;
+}
 
 static void SWHookedFrontDisplayDidChange(id self, SEL _cmd, id newDisplay) {
     if (SWOriginalFrontDisplayDidChange) {
@@ -57,9 +79,16 @@ static void SWInstallFrontDisplayObserver(void) {
 }
 
 static void SWStartFeature(void) {
-    SWInstallFrontDisplayObserver();
     SWOverlayController *controller = [SWOverlayController sharedInstance];
+    BOOL locked = SWFeatureIsUILocked();
+    [controller setSystemLocked:locked];
+    if (locked) {
+        SWFileLog(@"START deferred while lock screen active");
+        return;
+    }
+    SWInstallFrontDisplayObserver();
     [controller start];
+    [controller setSystemLocked:NO];
 }
 
 static void SWReloadFeaturePreferences(void) {

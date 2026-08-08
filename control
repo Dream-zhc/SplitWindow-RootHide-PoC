@@ -1,6 +1,6 @@
 Package: com.dream.splitwindow
 Name: SplitWindow
-Version: 0.6.1
+Version: 0.6.2
 Architecture: iphoneos-arm64
 Description: System-level single-instance windowed multitasking for iOS 16 Dopamine RootHide.
 Maintainer: Dream

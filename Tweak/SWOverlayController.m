@@ -3,6 +3,7 @@
 #import "SWSceneHost.h"
 #import "SWLogger.h"
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
 #import <dlfcn.h>
 #import <math.h>
@@ -42,6 +43,7 @@ static BOOL SWSwitcherIsVisible(void) {
 @interface SWFallbackPassThroughWindow : UIWindow
 @property (nonatomic, weak) UIView *interactionShieldView;
 @property (nonatomic) BOOL consumesRootTouches;
+@property (nonatomic) UIEdgeInsets systemGesturePassThroughInsets;
 @end
 
 @implementation SWFallbackPassThroughWindow
@@ -51,6 +53,16 @@ static BOOL SWSwitcherIsVisible(void) {
     // back to SpringBoard fullscreen instead of trapping taps in our shield.
     if (SWSwitcherIsVisible()) return nil;
     UIView *hit = [super hitTest:point withEvent:event];
+    UIEdgeInsets insets = self.systemGesturePassThroughInsets;
+    BOOL inSystemGestureBand = point.y <= insets.top ||
+                               point.y >= CGRectGetHeight(self.bounds) - insets.bottom;
+    if (inSystemGestureBand &&
+        (hit == self.rootViewController.view || hit == self.interactionShieldView || !hit)) {
+        // Keep Notification Center / Control Center and the Home gesture owned
+        // by SpringBoard's normal system-gesture pipeline. SplitWindow only
+        // consumes ordinary content-area touches.
+        return nil;
+    }
     if ((hit == self.rootViewController.view || !hit) &&
         self.consumesRootTouches &&
         self.interactionShieldView &&
@@ -136,6 +148,30 @@ static BOOL SWSwitcherIsVisible(void) {
 
 @end
 
+@interface SWEdgeHandleHitView : UIView
+@property (nonatomic, copy) dispatch_block_t touchBeganAction;
+@property (nonatomic, copy) dispatch_block_t touchEndedAction;
+@end
+
+@implementation SWEdgeHandleHitView
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.touchBeganAction) self.touchBeganAction();
+    [super touchesBegan:touches withEvent:event];
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesEnded:touches withEvent:event];
+    if (self.touchEndedAction) self.touchEndedAction();
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesCancelled:touches withEvent:event];
+    if (self.touchEndedAction) self.touchEndedAction();
+}
+
+@end
+
 typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     SWOverlaySessionStateIdle = 0,
     SWOverlaySessionStateLaunching,
@@ -144,6 +180,9 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 
 @interface SWOverlayController ()
 @property (nonatomic) BOOL started;
+@property (nonatomic) BOOL systemLocked;
+@property (nonatomic) BOOL interactionFocusOwned;
+@property (nonatomic) BOOL handleInteractionActive;
 @property (nonatomic, strong) UIWindow *overlayWindow;
 @property (nonatomic, strong) SWInteractionShieldView *shieldView;
 @property (nonatomic, strong) UIView *handleHitView;
@@ -485,6 +524,7 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     if ([self.overlayWindow isKindOfClass:[SWFallbackPassThroughWindow class]]) {
         SWFallbackPassThroughWindow *window = (SWFallbackPassThroughWindow *)self.overlayWindow;
         window.interactionShieldView = self.shieldView;
+        window.systemGesturePassThroughInsets = UIEdgeInsetsMake(26.0, 0.0, 30.0, 0.0);
     }
 
     self.hostContainer = [UIView new];
@@ -521,9 +561,25 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     self.panelView.hidden = YES;
     [root addSubview:self.panelView];
 
-    self.handleHitView = [UIView new];
+    SWEdgeHandleHitView *handleHitView = [SWEdgeHandleHitView new];
+    self.handleHitView = handleHitView;
     self.handleHitView.backgroundColor = UIColor.clearColor;
     self.handleHitView.userInteractionEnabled = YES;
+    self.handleHitView.exclusiveTouch = YES;
+    __weak typeof(self) weakHandleSelf = self;
+    handleHitView.touchBeganAction = ^{
+        __strong typeof(weakHandleSelf) self = weakHandleSelf;
+        if (!self) return;
+        self.handleInteractionActive = YES;
+        [self updateInteractionFocus];
+        SWFileLog(@"HANDLE touch-began local-ownership");
+    };
+    handleHitView.touchEndedAction = ^{
+        __strong typeof(weakHandleSelf) self = weakHandleSelf;
+        if (!self) return;
+        self.handleInteractionActive = NO;
+        [self updateInteractionFocus];
+    };
     [root addSubview:self.handleHitView];
 
     self.handleVisual = [UIView new];
@@ -534,16 +590,17 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 
     UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
     longPress.minimumPressDuration = 0.28;
-    longPress.cancelsTouchesInView = YES;
+    longPress.cancelsTouchesInView = NO;
     [self.handleHitView addGestureRecognizer:longPress];
 
     UIPanGestureRecognizer *inwardPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleInwardPan:)];
     inwardPan.minimumNumberOfTouches = 1;
     inwardPan.maximumNumberOfTouches = 1;
-    inwardPan.cancelsTouchesInView = YES;
+    inwardPan.cancelsTouchesInView = NO;
     [self.handleHitView addGestureRecognizer:inwardPan];
 
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTapped:)];
+    tap.cancelsTouchesInView = NO;
     [tap requireGestureRecognizerToFail:longPress];
     [tap requireGestureRecognizerToFail:inwardPan];
     [self.handleHitView addGestureRecognizer:tap];
@@ -557,7 +614,7 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 
 - (void)start {
     if (self.started) return;
-    SWFileLog(@"START v0.6.1 overlay begin");
+    SWFileLog(@"START v0.6.2 overlay begin");
     self.sceneHost = [SWSceneHost new];
     self.iconCache = [NSCache new];
     self.iconCache.countLimit = 64;
@@ -591,12 +648,40 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
         return;
     }
     self.started = YES;
-    SWFileLog(@"START v0.6.1 overlay ready side=%@ y=%.3f",
+    SWFileLog(@"START v0.6.2 overlay ready side=%@ y=%.3f",
               self.handleOnLeft ? @"left" : @"right",
               self.handleNormalizedY);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self prewarmSelectedAppIcons];
     });
+}
+
+- (void)setSystemLocked:(BOOL)locked {
+    if (_systemLocked == locked && (!self.started || !self.overlayWindow)) return;
+    _systemLocked = locked;
+
+    if (!self.started || !self.overlayWindow) {
+        SWFileLog(@"LOCK state=%d overlayStarted=%d", locked, self.started);
+        return;
+    }
+
+    if (locked) {
+        self.handleInteractionActive = NO;
+        if (self.panelVisible) [self hidePanel];
+        if (self.sessionState == SWOverlaySessionStateWindowed) {
+            [self dismissHostPreservingScene:YES];
+        }
+        [self updateInteractionFocus];
+        self.overlayWindow.hidden = YES;
+        SWFileLog(@"LOCK overlay hidden");
+        return;
+    }
+
+    if ([SWPreferences enabled]) {
+        self.overlayWindow.hidden = NO;
+        [self layoutAllForCurrentEnvironment];
+        SWFileLog(@"LOCK first-unlock overlay visible");
+    }
 }
 
 - (void)reloadPreferences {
@@ -607,10 +692,12 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
         [self hidePanel];
         [self dismissHostPreservingScene:YES];
         self.overlayWindow.hidden = YES;
-    } else {
+    } else if (!self.systemLocked) {
         self.overlayWindow.hidden = NO;
         [self configureShieldGesture];
         [self layoutAllForCurrentEnvironment];
+    } else {
+        self.overlayWindow.hidden = YES;
     }
     self.panelSignature = nil;
     SWFileLog(@"PREF reload enabled=%d scale=%.3f doubleTap=%d",
@@ -675,7 +762,7 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     CGRect screen = [self activeScreenBounds];
     CGFloat centerY = CGRectGetHeight(screen) * self.handleNormalizedY;
     CGFloat safe = 12.0;
-    CGFloat halfHandle = 40.0;
+    CGFloat halfHandle = 48.0;
     CGFloat halfPanel = panelHeight > 0 ? panelHeight * 0.5 : 0.0;
     CGFloat margin = MAX(halfHandle, halfPanel) + safe;
     centerY = MAX(margin, MIN(centerY, CGRectGetHeight(screen) - margin));
@@ -684,8 +771,10 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 
 - (CGRect)snappedHandleFrameForPanelHeight:(CGFloat)panelHeight {
     CGRect screen = [self activeScreenBounds];
-    CGFloat width = 24.0;
-    CGFloat height = 80.0;
+    // This local hit target is the only edge region SplitWindow owns. A touch
+    // beginning elsewhere remains entirely with the foreground app.
+    CGFloat width = 36.0;
+    CGFloat height = 96.0;
     CGFloat x = self.handleOnLeft ? 0.0 : CGRectGetWidth(screen) - width;
     CGFloat centerY = [self clampedHandleCenterYForPanelHeight:panelHeight];
     return CGRectMake(x, floor(centerY - height * 0.5), width, height);
@@ -696,7 +785,10 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     void (^block)(void) = ^{
         self.handleHitView.frame = frame;
         CGFloat visualX = self.handleOnLeft ? 4.0 : CGRectGetWidth(frame) - 8.0;
-        self.handleVisual.frame = CGRectMake(visualX, 11.0, 4.0, 58.0);
+        self.handleVisual.frame = CGRectMake(visualX,
+                                             floor((CGRectGetHeight(frame) - 58.0) * 0.5),
+                                             4.0,
+                                             58.0);
     };
     if (animated) {
         [UIView animateWithDuration:0.18
@@ -712,10 +804,13 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 - (CGRect)panelFrameForSize:(CGSize)size {
     CGRect screen = [self activeScreenBounds];
     CGRect handleFrame = [self snappedHandleFrameForPanelHeight:size.height];
-    CGFloat gap = 8.0;
+    // Hit-target width and visual spacing are intentionally decoupled. Keep
+    // the picker visually close to the edge pill even though touch ownership
+    // is expanded to 36pt for reliability.
+    CGFloat visualInset = 32.0;
     CGFloat x = self.handleOnLeft
-        ? CGRectGetMaxX(handleFrame) + gap
-        : CGRectGetMinX(handleFrame) - gap - size.width;
+        ? visualInset
+        : CGRectGetWidth(screen) - visualInset - size.width;
     CGFloat centerY = CGRectGetMidY(handleFrame);
     CGFloat y = centerY - size.height * 0.5;
     CGRect frame = CGRectMake(floor(x), floor(y), size.width, size.height);
@@ -777,8 +872,8 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     UIView *root = self.overlayWindow.rootViewController.view;
     CGPoint location = [gesture locationInView:root];
     CGRect screen = [self activeScreenBounds];
-    CGFloat width = 24.0;
-    CGFloat height = 80.0;
+    CGFloat width = 36.0;
+    CGFloat height = 96.0;
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
         [self lightImpactHaptic];
@@ -790,7 +885,10 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
         CGFloat x = MAX(0.0, MIN(location.x - width * 0.5, CGRectGetWidth(screen) - width));
         self.handleHitView.frame = CGRectMake(x, centerY - height * 0.5, width, height);
         CGFloat visualX = CGRectGetMidX(self.handleHitView.bounds) - 2.0;
-        self.handleVisual.frame = CGRectMake(visualX, 11.0, 4.0, 58.0);
+        self.handleVisual.frame = CGRectMake(visualX,
+                                             floor((height - 58.0) * 0.5),
+                                             4.0,
+                                             58.0);
         return;
     }
 
@@ -962,6 +1060,35 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 
 #pragma mark - Interaction shield
 
+- (void)updateInteractionFocus {
+    BOOL shouldOwnFocus = !self.systemLocked &&
+                          self.overlayWindow &&
+                          !self.overlayWindow.hidden &&
+                          (self.handleInteractionActive ||
+                           self.panelVisible ||
+                           self.sessionState == SWOverlaySessionStateWindowed);
+    if (shouldOwnFocus == self.interactionFocusOwned) return;
+
+    if (shouldOwnFocus) {
+        // Making the SpringBoard overlay key uses UIKit's own local event
+        // deferring graph. That is materially different from a high-level
+        // non-key transparent window: the same HID touch should no longer be
+        // delivered to the fullscreen app behind SplitWindow while the picker
+        // or outside-dismiss shield is modal.
+        [self.overlayWindow makeKeyAndVisible];
+        self.interactionFocusOwned = YES;
+        SWFileLog(@"TOUCH focus acquire key=%d", self.overlayWindow.isKeyWindow);
+        return;
+    }
+
+    SEL resignSelector = NSSelectorFromString(@"resignKeyWindow");
+    if ([self.overlayWindow respondsToSelector:resignSelector]) {
+        ((void (*)(id, SEL))objc_msgSend)(self.overlayWindow, resignSelector);
+    }
+    self.interactionFocusOwned = NO;
+    SWFileLog(@"TOUCH focus release key=%d", self.overlayWindow.isKeyWindow);
+}
+
 - (void)configureShieldGesture {
     self.shieldView.immediateTapMode = self.panelVisible;
     self.shieldView.requiresDoubleTap = !self.panelVisible && [SWPreferences dismissRequiresDoubleTap];
@@ -980,6 +1107,7 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     if ([self.overlayWindow isKindOfClass:[SWFallbackPassThroughWindow class]]) {
         ((SWFallbackPassThroughWindow *)self.overlayWindow).consumesRootTouches = shouldShow;
     }
+    [self updateInteractionFocus];
 
     UIView *root = self.overlayWindow.rootViewController.view;
     if (self.panelVisible) {
@@ -1154,31 +1282,35 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     [self layoutHostContainer];
     [self.sceneLogicalView layoutIfNeeded];
     [hostedView layoutIfNeeded];
+
+    // P0 launch-animation rule: the destination window must already be visible
+    // before the system default Scene is resumed. Keeping this container hidden
+    // until the next main-queue turn can discard the earliest LaunchScreen /
+    // snapshot frames and make a cold launch appear as "nothing -> first app
+    // frame". The container itself is transparent, so arming it early does not
+    // introduce a synthetic black/white shell.
+    self.hostContainer.alpha = 1.0;
+    self.hostContainer.transform = CGAffineTransformIdentity;
+    self.hostContainer.hidden = NO;
+    [self.overlayWindow.rootViewController.view layoutIfNeeded];
+    [CATransaction flush];
+    SWFileLog(@"LAUNCH native-surface armed %@ before-foreground frame=%@",
+              bundleIdentifier,
+              NSStringFromCGRect(self.hostContainer.frame));
+
     [self.sceneHost updateSceneForHostBounds:logical interfaceOrientation:contentOrientation];
 
-    // No synthetic black shell / spinner. The container becomes visible only
-    // after the native default Scene has a presentation view and one main-queue
-    // turn to connect its remote surface (LaunchScreen on a true cold start).
-    self.hostContainer.hidden = YES;
+    // No synthetic black shell / spinner and no SplitWindow entrance animation.
+    // The next turn is now used only to mark the session interactive; visual
+    // presentation was armed before foregrounding so native launch frames are
+    // free to arrive immediately.
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self.hostedView != hostedView || ![self.openingBundleIdentifier isEqualToString:bundleIdentifier]) return;
         self.sessionState = SWOverlaySessionStateWindowed;
-        self.hostContainer.alpha = 0.0;
-        self.hostContainer.transform = CGAffineTransformMakeScale(0.965, 0.965);
-        self.hostContainer.hidden = NO;
         self.openingBundleIdentifier = nil;
         [self updateInteractionShield];
         CFAbsoluteTime elapsed = (CFAbsoluteTimeGetCurrent() - self.openRequestedAt) * 1000.0;
         SWFileLog(@"PERF visible %@ %.0fms frame=%@", bundleIdentifier, elapsed, NSStringFromCGRect(self.hostContainer.frame));
-        [UIView animateWithDuration:0.20
-                              delay:0.0
-             usingSpringWithDamping:0.92
-              initialSpringVelocity:0.10
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
-                         animations:^{
-            self.hostContainer.alpha = 1.0;
-            self.hostContainer.transform = CGAffineTransformIdentity;
-        } completion:nil];
     });
 }
 
