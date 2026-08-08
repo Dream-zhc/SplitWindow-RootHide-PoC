@@ -13,11 +13,6 @@ static id SWMsg1(id obj, SEL sel, id arg) {
     return ((id (*)(id, SEL, id))objc_msgSend)(obj, sel, arg);
 }
 
-static id SWMsg2(id obj, SEL sel, id a, id b) {
-    if (!obj || ![obj respondsToSelector:sel]) return nil;
-    return ((id (*)(id, SEL, id, id))objc_msgSend)(obj, sel, a, b);
-}
-
 static void SWVoid0(id obj, SEL sel) {
     if (!obj || ![obj respondsToSelector:sel]) return;
     ((void (*)(id, SEL))objc_msgSend)(obj, sel);
@@ -51,6 +46,13 @@ static void SWVoidCGRect(id obj, SEL sel, CGRect value) {
 static int SWInt0(id obj, SEL sel) {
     if (!obj || ![obj respondsToSelector:sel]) return 0;
     return ((int (*)(id, SEL))objc_msgSend)(obj, sel);
+}
+
+static BOOL SWBool0(id obj, SEL sel) {
+    if (!obj || ![obj respondsToSelector:sel]) return NO;
+    NSMethodSignature *signature = [obj methodSignatureForSelector:sel];
+    if (!signature || signature.numberOfArguments != 2 || signature.methodReturnLength != sizeof(BOOL)) return NO;
+    return ((BOOL (*)(id, SEL))objc_msgSend)(obj, sel);
 }
 
 typedef NS_ENUM(NSInteger, SWSceneHostState) {
@@ -110,47 +112,6 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
     return handle;
 }
 
-- (BOOL)registerProcessHandleIfPossible:(id)processHandle {
-    id manager = [self processManager];
-    SEL auditSelector = NSSelectorFromString(@"auditToken");
-    SEL registerSelector = NSSelectorFromString(@"registerProcessForAuditToken:");
-    if (!processHandle || !manager ||
-        ![processHandle respondsToSelector:auditSelector] ||
-        ![manager respondsToSelector:registerSelector]) return NO;
-
-    NSMethodSignature *auditSignature = [processHandle methodSignatureForSelector:auditSelector];
-    NSMethodSignature *registerSignature = [manager methodSignatureForSelector:registerSelector];
-    if (!auditSignature || !registerSignature || auditSignature.methodReturnLength == 0 ||
-        registerSignature.numberOfArguments < 3) return NO;
-
-    NSUInteger tokenLength = auditSignature.methodReturnLength;
-    NSUInteger argumentLength = 0;
-    NSGetSizeAndAlignment([registerSignature getArgumentTypeAtIndex:2], &argumentLength, NULL);
-    NSUInteger bufferLength = MAX(tokenLength, argumentLength);
-    void *token = calloc(1, bufferLength);
-    if (!token) return NO;
-
-    BOOL success = NO;
-    @try {
-        NSInvocation *auditInvocation = [NSInvocation invocationWithMethodSignature:auditSignature];
-        auditInvocation.target = processHandle;
-        auditInvocation.selector = auditSelector;
-        [auditInvocation invoke];
-        [auditInvocation getReturnValue:token];
-
-        NSInvocation *registerInvocation = [NSInvocation invocationWithMethodSignature:registerSignature];
-        registerInvocation.target = manager;
-        registerInvocation.selector = registerSelector;
-        [registerInvocation setArgument:token atIndex:2];
-        [registerInvocation invoke];
-        success = YES;
-    } @catch (NSException *exception) {
-        SWFileLog(@"PROC register audit token exception=%@", exception);
-    }
-    free(token);
-    return success;
-}
-
 - (id)springBoardApplicationForBundleIdentifier:(NSString *)bundleIdentifier {
     id controller = SWMsg0(NSClassFromString(@"SBApplicationController"), NSSelectorFromString(@"sharedInstance"));
     if (!controller) return nil;
@@ -169,6 +130,25 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
         if ([value isKindOfClass:[NSString class]] && [value length] > 0) return value;
     }
     return nil;
+}
+
+- (BOOL)isBundleIdentifierForeground:(NSString *)bundleIdentifier {
+    id application = [self springBoardApplicationForBundleIdentifier:bundleIdentifier];
+    if (!application) return NO;
+
+    for (NSString *selectorName in @[@"isForeground", @"isFrontmost", @"isRunningForeground"]) {
+        if (SWBool0(application, NSSelectorFromString(selectorName))) return YES;
+    }
+
+    id processState = SWMsg0(application, NSSelectorFromString(@"processState"));
+    for (NSString *selectorName in @[@"isForeground", @"isFrontmost"]) {
+        if (SWBool0(processState, NSSelectorFromString(selectorName))) return YES;
+    }
+
+    NSString *description = [[processState description] lowercaseString];
+    return [description containsString:@"visibility: foreground"] ||
+           [description containsString:@"visibility=foreground"] ||
+           [description containsString:@"foregroundrunning"];
 }
 
 - (BOOL)isSceneUsable:(id)scene {
@@ -216,15 +196,88 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
     return nil;
 }
 
-- (void)launchColdWindowed:(NSString *)bundleIdentifier {
-    UIApplication *application = UIApplication.sharedApplication;
-    SEL selector = NSSelectorFromString(@"launchApplicationWithIdentifier:suspended:");
-    if ([application respondsToSelector:selector]) {
-        ((void (*)(id, SEL, id, BOOL))objc_msgSend)(application, selector, bundleIdentifier, YES);
-        SWFileLog(@"PROC cold-windowed launch %@ suspended=1", bundleIdentifier);
-        return;
+- (BOOL)requestSystemOpenForBundleIdentifier:(NSString *)bundleIdentifier
+                           activateSuspended:(BOOL)activateSuspended {
+    if (bundleIdentifier.length == 0) return NO;
+
+    NSDictionary *optionDictionary = @{
+        @"__ActivateSuspended": @(activateSuspended),
+        @"__Actions": @[],
+        @"__PromptUnlockDevice": @YES,
+        @"__LaunchOrigin": @"__SBLaunchOriginSplitWindow",
+    };
+    id options = SWMsg1(NSClassFromString(@"FBSOpenApplicationOptions"),
+                        NSSelectorFromString(@"optionsWithDictionary:"),
+                        optionDictionary);
+    if (!options) {
+        SWFileLog(@"SYSTEM-OPEN options unavailable %@", bundleIdentifier);
+        return NO;
     }
-    SWFileLog(@"PROC launch selector unavailable %@", bundleIdentifier);
+
+    Class requestClass = NSClassFromString(@"FBSystemServiceOpenApplicationRequest");
+    id request = SWMsg0(requestClass, NSSelectorFromString(@"request"));
+    if (!request && requestClass) request = [requestClass new];
+    id workspace = SWMsg0(NSClassFromString(@"SBMainWorkspace"), NSSelectorFromString(@"sharedInstance"));
+    id systemService = SWMsg0(NSClassFromString(@"FBSystemService"), NSSelectorFromString(@"sharedInstance"));
+    if (!systemService) systemService = SWMsg0(NSClassFromString(@"FBSystemService"), NSSelectorFromString(@"sharedService"));
+
+    SEL workspaceSelector = NSSelectorFromString(@"systemService:handleOpenApplicationRequest:withCompletion:");
+    NSMethodSignature *workspaceSignature = [workspace methodSignatureForSelector:workspaceSelector];
+    void (^completion)(void) = ^{};
+    if (request && workspace && systemService &&
+        [workspace respondsToSelector:workspaceSelector] &&
+        workspaceSignature && workspaceSignature.numberOfArguments == 5) {
+        SWVoid1(request, NSSelectorFromString(@"setOptions:"), options);
+        SWVoid1(request, NSSelectorFromString(@"setBundleIdentifier:"), bundleIdentifier);
+        SWVoidBool(request, NSSelectorFromString(@"setTrusted:"), YES);
+        id systemProcess = SWMsg0([self processManager], NSSelectorFromString(@"systemApplicationProcess"));
+        if (systemProcess) SWVoid1(request, NSSelectorFromString(@"setClientProcess:"), systemProcess);
+        ((void (*)(id, SEL, id, id, id))objc_msgSend)(workspace,
+                                                       workspaceSelector,
+                                                       systemService,
+                                                       request,
+                                                       completion);
+        SWFileLog(@"SYSTEM-OPEN request %@ suspended=%d route=workspace",
+                  bundleIdentifier,
+                  activateSuspended);
+        return YES;
+    }
+
+    Class openServiceClass = NSClassFromString(@"FBSOpenApplicationService");
+    id openService = openServiceClass ? [openServiceClass new] : nil;
+    SEL openSelector = NSSelectorFromString(@"openApplication:withOptions:completion:");
+    NSMethodSignature *openSignature = [openService methodSignatureForSelector:openSelector];
+    if (openService && [openService respondsToSelector:openSelector] &&
+        openSignature && openSignature.numberOfArguments == 5) {
+        ((void (*)(id, SEL, id, id, id))objc_msgSend)(openService,
+                                                       openSelector,
+                                                       bundleIdentifier,
+                                                       options,
+                                                       completion);
+        SWFileLog(@"SYSTEM-OPEN request %@ suspended=%d route=fbs-service",
+                  bundleIdentifier,
+                  activateSuspended);
+        return YES;
+    }
+
+    // Compatibility fallback only. Unlike the old `suspended:YES` process-only
+    // launch, this asks SpringBoard to run the app so its own default Scene can
+    // be registered. SplitWindow still never creates an FBScene itself.
+    UIApplication *springBoard = UIApplication.sharedApplication;
+    SEL launchSelector = NSSelectorFromString(@"launchApplicationWithIdentifier:suspended:");
+    NSMethodSignature *launchSignature = [springBoard methodSignatureForSelector:launchSelector];
+    if ([springBoard respondsToSelector:launchSelector] && launchSignature &&
+        launchSignature.numberOfArguments == 4) {
+        ((void (*)(id, SEL, id, BOOL))objc_msgSend)(springBoard,
+                                                    launchSelector,
+                                                    bundleIdentifier,
+                                                    NO);
+        SWFileLog(@"SYSTEM-OPEN request %@ suspended=0 route=UIApplication-fallback", bundleIdentifier);
+        return YES;
+    }
+
+    SWFileLog(@"SYSTEM-OPEN unavailable %@", bundleIdentifier);
+    return NO;
 }
 
 - (BOOL)sendHomeButtonIfPossible {
@@ -277,115 +330,6 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
     } else {
         SWVoid2(scene, NSSelectorFromString(@"updateSettings:withTransitionContext:"), settings, nil);
     }
-}
-
-- (id)createCanonicalDefaultSceneForProcessHandle:(id)processHandle error:(NSError **)errorOut {
-    NSString *bundleIdentifier = self.bundleIdentifier;
-    id sceneManager = [self sceneManager];
-    if (!sceneManager || bundleIdentifier.length == 0) {
-        if (errorOut) *errorOut = [NSError errorWithDomain:@"com.dream.splitwindow" code:20 userInfo:@{NSLocalizedDescriptionKey:@"FBSceneManager unavailable."}];
-        return nil;
-    }
-
-    NSString *sceneIdentifier = [self canonicalSceneIdentifierForBundleIdentifier:bundleIdentifier];
-    id existing = SWMsg1(sceneManager, NSSelectorFromString(@"sceneWithIdentifier:"), sceneIdentifier);
-    if ([self isSceneUsable:existing]) {
-        self.sceneIdentifier = sceneIdentifier;
-        SWFileLog(@"SCENE-DEFAULT raced %@ id=%@", bundleIdentifier, sceneIdentifier);
-        return existing;
-    }
-
-    Class definitionClass = NSClassFromString(@"FBSMutableSceneDefinition");
-    Class sceneIdentityClass = NSClassFromString(@"FBSSceneIdentity");
-    Class clientIdentityClass = NSClassFromString(@"FBSSceneClientIdentity");
-    Class specificationClass = NSClassFromString(@"UIApplicationSceneSpecification");
-    Class parametersClass = NSClassFromString(@"FBSMutableSceneParameters");
-    Class settingsClass = NSClassFromString(@"UIMutableApplicationSceneSettings");
-    Class clientSettingsClass = NSClassFromString(@"UIMutableApplicationSceneClientSettings");
-    if (!definitionClass || !sceneIdentityClass || !clientIdentityClass || !specificationClass ||
-        !parametersClass || !settingsClass || !clientSettingsClass) {
-        if (errorOut) *errorOut = [NSError errorWithDomain:@"com.dream.splitwindow" code:21 userInfo:@{NSLocalizedDescriptionKey:@"Required FrontBoard Scene classes are unavailable."}];
-        return nil;
-    }
-
-    id processIdentity = SWMsg0(processHandle, NSSelectorFromString(@"identity"));
-    if (!processIdentity) processIdentity = [self processIdentityForBundleIdentifier:bundleIdentifier];
-    if (!processIdentity) {
-        if (errorOut) *errorOut = [NSError errorWithDomain:@"com.dream.splitwindow" code:22 userInfo:@{NSLocalizedDescriptionKey:@"Could not resolve target process identity."}];
-        return nil;
-    }
-
-    id definition = SWMsg0(definitionClass, NSSelectorFromString(@"definition"));
-    id sceneIdentity = SWMsg1(sceneIdentityClass, NSSelectorFromString(@"identityForIdentifier:"), sceneIdentifier);
-    id clientIdentity = SWMsg1(clientIdentityClass, NSSelectorFromString(@"identityForProcessIdentity:"), processIdentity);
-    id specification = SWMsg0(specificationClass, NSSelectorFromString(@"specification"));
-    id parameters = SWMsg1(parametersClass, NSSelectorFromString(@"parametersForSpecification:"), specification);
-    if (!definition || !sceneIdentity || !clientIdentity || !specification || !parameters) {
-        if (errorOut) *errorOut = [NSError errorWithDomain:@"com.dream.splitwindow" code:23 userInfo:@{NSLocalizedDescriptionKey:@"Failed to build canonical default Scene definition."}];
-        return nil;
-    }
-
-    SWVoid1(definition, NSSelectorFromString(@"setIdentity:"), sceneIdentity);
-    SWVoid1(definition, NSSelectorFromString(@"setClientIdentity:"), clientIdentity);
-    SWVoid1(definition, NSSelectorFromString(@"setSpecification:"), specification);
-
-    id displayConfiguration = SWMsg0(UIScreen.mainScreen, NSSelectorFromString(@"displayConfiguration"));
-    void (^sceneSettings)(id) = ^(id settings) {
-        SWVoidBool(settings, NSSelectorFromString(@"setCanShowAlerts:"), YES);
-        SWVoidBool(settings, NSSelectorFromString(@"setForeground:"), YES);
-        SWVoidBool(settings, NSSelectorFromString(@"setBackgrounded:"), NO);
-        SWVoidInteger(settings, NSSelectorFromString(@"setLevel:"), 1);
-        SWVoid1(settings, NSSelectorFromString(@"setPersistenceIdentifier:"), sceneIdentifier);
-        SWVoidBool(settings, NSSelectorFromString(@"setStatusBarDisabled:"), YES);
-        if (displayConfiguration) SWVoid1(settings, NSSelectorFromString(@"setDisplayConfiguration:"), displayConfiguration);
-    };
-    SEL updateSettings = NSSelectorFromString(@"updateSettingsWithBlock:");
-    if ([parameters respondsToSelector:updateSettings]) {
-        SWVoid1(parameters, updateSettings, sceneSettings);
-    } else {
-        id settings = [settingsClass new];
-        sceneSettings(settings);
-        SWVoid1(parameters, NSSelectorFromString(@"setSettings:"), settings);
-    }
-
-    void (^clientSettings)(id) = ^(id settings) {
-        SWVoidInteger(settings, NSSelectorFromString(@"setInterfaceOrientation:"), UIInterfaceOrientationPortrait);
-        SWVoidInteger(settings, NSSelectorFromString(@"setStatusBarStyle:"), 0);
-    };
-    SEL updateClientSettings = NSSelectorFromString(@"updateClientSettingsWithBlock:");
-    if ([parameters respondsToSelector:updateClientSettings]) {
-        SWVoid1(parameters, updateClientSettings, clientSettings);
-    } else {
-        id settings = [clientSettingsClass new];
-        clientSettings(settings);
-        SWVoid1(parameters, NSSelectorFromString(@"setClientSettings:"), settings);
-    }
-
-    BOOL registered = [self registerProcessHandleIfPossible:processHandle];
-    SWFileLog(@"SCENE-CREATE canonical %@ pid=%d registered=%d id=%@",
-              bundleIdentifier,
-              SWInt0(processHandle, NSSelectorFromString(@"pid")),
-              registered,
-              sceneIdentifier);
-
-    id scene = nil;
-    @try {
-        scene = SWMsg2(sceneManager,
-                       NSSelectorFromString(@"createSceneWithDefinition:initialParameters:"),
-                       definition,
-                       parameters);
-    } @catch (NSException *exception) {
-        SWFileLog(@"SCENE-CREATE canonical exception %@ exception=%@", bundleIdentifier, exception);
-    }
-    if (!scene) scene = SWMsg1(sceneManager, NSSelectorFromString(@"sceneWithIdentifier:"), sceneIdentifier);
-    if (![self isSceneUsable:scene]) {
-        if (errorOut) *errorOut = [NSError errorWithDomain:@"com.dream.splitwindow" code:24 userInfo:@{NSLocalizedDescriptionKey:@"FrontBoard did not create the canonical default Scene."}];
-        return nil;
-    }
-
-    self.sceneIdentifier = sceneIdentifier;
-    SWFileLog(@"SCENE-CREATE canonical success %@ scene=%@", bundleIdentifier, scene);
-    return scene;
 }
 
 - (UIView *)presentationViewForScene:(id)scene {
@@ -481,8 +425,20 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
 
     CFAbsoluteTime sceneElapsed = (CFAbsoluteTimeGetCurrent() - self.openStartedAt) * 1000.0;
     SWFileLog(@"PERF scene-ready %@ %.0fms id=%@", self.bundleIdentifier, sceneElapsed, self.sceneIdentifier);
-    [self updateScene:scene windowedForeground:YES];
+
+    // Bind the remote presentation while the system Scene is still suspended
+    // or backgrounded whenever possible. The overlay inserts this view into its
+    // final hierarchy first, then `updateSceneForHostBounds:` foregrounds the
+    // Scene. That ordering preserves the app's native launch/snapshot surface
+    // instead of resuming the client to its first frame before we can see it.
     UIView *hostedView = [self presentationViewForScene:scene];
+    BOOL boundBeforeForeground = hostedView != nil;
+    if (!hostedView) {
+        // Compatibility fallback for builds where the presentation manager only
+        // produces a view for a foreground Scene. Never create another Scene.
+        [self updateScene:scene windowedForeground:YES];
+        hostedView = [self presentationViewForScene:scene];
+    }
     if (!hostedView) {
         NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow" code:3 userInfo:@{NSLocalizedDescriptionKey:@"No supported default-Scene presentation API was available."}];
         self.state = SWSceneHostStateBackgrounded;
@@ -493,7 +449,10 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
     self.state = SWSceneHostStateWindowed;
     hostedView.userInteractionEnabled = YES;
     CFAbsoluteTime elapsed = (CFAbsoluteTimeGetCurrent() - self.openStartedAt) * 1000.0;
-    SWFileLog(@"PERF presentation-ready %@ %.0fms", self.bundleIdentifier, elapsed);
+    SWFileLog(@"PERF presentation-ready %@ %.0fms preForeground=%d",
+              self.bundleIdentifier,
+              elapsed,
+              boundBeforeForeground);
     completion(hostedView, nil);
 }
 
@@ -522,7 +481,9 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
                                          completion:(SWSceneHostCompletion)completion {
     if (generation != self.openGeneration) return;
     NSString *frontMost = [self frontMostBundleIdentifier];
-    if (frontMost.length == 0 || ![frontMost isEqualToString:bundleIdentifier]) {
+    BOOL targetStillForeground = [frontMost isEqualToString:bundleIdentifier] ||
+                                 [self isBundleIdentifierForeground:bundleIdentifier];
+    if (!targetStillForeground) {
         SWFileLog(@"HANDOFF foreground released %@ attempts=%lu front=%@",
                   bundleIdentifier,
                   (unsigned long)attempt,
@@ -534,7 +495,7 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
     // This polling exists only for the foreground-self handoff and normally
     // lasts one or two display frames. It prevents presenting one Scene in the
     // system fullscreen host and SplitWindow at the same time (black surface).
-    if (attempt >= 15) {
+    if (attempt >= 45) {
         SWFileLog(@"HANDOFF foreground release timeout %@ front=%@", bundleIdentifier, frontMost);
         NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow"
                                              code:31
@@ -553,63 +514,80 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
     });
 }
 
-- (void)openForProcessHandle:(id)processHandle generation:(NSUInteger)generation completion:(SWSceneHostCompletion)completion {
-    if (generation != self.openGeneration) return;
-    NSString *matchedIdentifier = nil;
-    id scene = [self systemDefaultSceneForBundleIdentifier:self.bundleIdentifier matchedIdentifier:&matchedIdentifier];
-    if (scene) {
-        self.sceneIdentifier = matchedIdentifier;
-        SWFileLog(@"SCENE-SYSTEM reuse %@ id=%@", self.bundleIdentifier, matchedIdentifier);
-        [self finishOpenForScene:scene generation:generation completion:completion];
-        return;
-    }
-
-    NSError *error = nil;
-    scene = [self createCanonicalDefaultSceneForProcessHandle:processHandle error:&error];
-    if (!scene) {
-        SWFileLog(@"SCENE-CREATE canonical failed %@ error=%@", self.bundleIdentifier, error);
-        completion(nil, error);
-        return;
-    }
-    [self finishOpenForScene:scene generation:generation completion:completion];
-}
-
-- (void)pollColdProcessForBundleIdentifier:(NSString *)bundleIdentifier
-                                 generation:(NSUInteger)generation
-                                    attempt:(NSUInteger)attempt
-                                 completion:(SWSceneHostCompletion)completion {
+- (void)pollSystemDefaultSceneForBundleIdentifier:(NSString *)bundleIdentifier
+                                        generation:(NSUInteger)generation
+                                           attempt:(NSUInteger)attempt
+                                         escalated:(BOOL)escalated
+                                 foregroundHandoff:(BOOL)foregroundHandoff
+                                        completion:(SWSceneHostCompletion)completion {
     if (generation != self.openGeneration) return;
 
     NSString *matchedIdentifier = nil;
-    id earlyScene = [self systemDefaultSceneForBundleIdentifier:bundleIdentifier matchedIdentifier:&matchedIdentifier];
-    if (earlyScene) {
+    id scene = [self systemDefaultSceneForBundleIdentifier:bundleIdentifier matchedIdentifier:&matchedIdentifier];
+    if ([self isSceneUsable:scene]) {
         self.sceneIdentifier = matchedIdentifier;
-        SWFileLog(@"SCENE-SYSTEM cold-early %@ attempt=%lu id=%@", bundleIdentifier, (unsigned long)attempt, matchedIdentifier);
-        [self finishOpenForScene:earlyScene generation:generation completion:completion];
+        self.scene = scene;
+        BOOL mustReleaseSystemFullscreen = foregroundHandoff || escalated;
+        SWFileLog(@"SCENE-SYSTEM acquired %@ attempt=%lu id=%@ route=%@ release=%d",
+                  bundleIdentifier,
+                  (unsigned long)attempt,
+                  matchedIdentifier,
+                  escalated ? @"foreground-fallback" : @"suspended-system",
+                  mustReleaseSystemFullscreen);
+        [self openExistingDefaultScene:scene
+                            generation:generation
+                     foregroundHandoff:mustReleaseSystemFullscreen
+                            completion:completion];
         return;
     }
 
-    id handle = [self processHandleForBundleIdentifier:bundleIdentifier];
-    int pid = SWInt0(handle, NSSelectorFromString(@"pid"));
-    if (handle && pid > 0) {
-        SWFileLog(@"PROC cold ready %@ pid=%d attempts=%lu", bundleIdentifier, pid, (unsigned long)attempt);
-        [self openForProcessHandle:handle generation:generation completion:completion];
+    // A suspended trusted SystemService request is the preferred path because
+    // it asks SpringBoard to construct the real installed app default Scene
+    // without SplitWindow inventing a second scene. If a particular iOS build
+    // does not materialize a Scene for suspended activation, escalate once to
+    // a normal system open request and immediately hand that same Scene back
+    // from fullscreen before presenting it in the mini-window.
+    if (!escalated && attempt == 24) {
+        BOOL requested = [self requestSystemOpenForBundleIdentifier:bundleIdentifier activateSuspended:NO];
+        if (!requested) {
+            NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow"
+                                                 code:25
+                                             userInfo:@{NSLocalizedDescriptionKey:@"SpringBoard could not create the app's system default Scene."}];
+            self.state = SWSceneHostStateIdle;
+            completion(nil, error);
+            return;
+        }
+        SWFileLog(@"SYSTEM-OPEN escalate foreground %@ after=%lums",
+                  bundleIdentifier,
+                  (unsigned long)(attempt * 16));
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.016 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self pollSystemDefaultSceneForBundleIdentifier:bundleIdentifier
+                                                  generation:generation
+                                                     attempt:attempt + 1
+                                                   escalated:YES
+                                           foregroundHandoff:foregroundHandoff
+                                                  completion:completion];
+        });
         return;
     }
 
-    if (attempt >= 100) {
-        NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow" code:2 userInfo:@{NSLocalizedDescriptionKey:@"Timed out waiting for the target app process."}];
+    if (attempt >= 120) {
+        NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow"
+                                             code:2
+                                         userInfo:@{NSLocalizedDescriptionKey:@"Timed out waiting for SpringBoard's system default Scene."}];
         self.state = SWSceneHostStateIdle;
-        SWFileLog(@"PROC cold timeout %@", bundleIdentifier);
+        SWFileLog(@"SCENE-SYSTEM timeout %@ escalated=%d", bundleIdentifier, escalated);
         completion(nil, error);
         return;
     }
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.02 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self pollColdProcessForBundleIdentifier:bundleIdentifier
-                                      generation:generation
-                                         attempt:attempt + 1
-                                      completion:completion];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.016 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self pollSystemDefaultSceneForBundleIdentifier:bundleIdentifier
+                                              generation:generation
+                                                 attempt:attempt + 1
+                                               escalated:escalated
+                                       foregroundHandoff:foregroundHandoff
+                                              completion:completion];
     });
 }
 
@@ -638,30 +616,46 @@ typedef NS_ENUM(NSInteger, SWSceneHostState) {
 
     self.bundleIdentifier = bundleIdentifier;
     self.state = SWSceneHostStateLaunching;
-    SWFileLog(@"STATE launching %@ foregroundHandoff=%d", bundleIdentifier, foregroundHandoff);
+    BOOL targetIsSystemForeground = foregroundHandoff || [self isBundleIdentifierForeground:bundleIdentifier];
+    SWFileLog(@"STATE launching %@ foregroundHandoff=%d detectedForeground=%d",
+              bundleIdentifier,
+              foregroundHandoff,
+              targetIsSystemForeground);
 
     NSString *matchedIdentifier = nil;
     id existingScene = [self systemDefaultSceneForBundleIdentifier:bundleIdentifier matchedIdentifier:&matchedIdentifier];
     if ([self isSceneUsable:existingScene]) {
         self.sceneIdentifier = matchedIdentifier;
         self.scene = existingScene;
+        SWFileLog(@"SCENE-SYSTEM reuse %@ id=%@", bundleIdentifier, matchedIdentifier);
         [self openExistingDefaultScene:existingScene
                             generation:generation
-                     foregroundHandoff:foregroundHandoff
+                     foregroundHandoff:targetIsSystemForeground
                             completion:completion];
         return;
     }
 
     id handle = [self processHandleForBundleIdentifier:bundleIdentifier];
     int pid = SWInt0(handle, NSSelectorFromString(@"pid"));
-    if (handle && pid > 0) {
-        SWFileLog(@"PROC warm-no-scene %@ pid=%d", bundleIdentifier, pid);
-        [self openForProcessHandle:handle generation:generation completion:completion];
+    SWFileLog(@"PROC system-scene request %@ state=%@ pid=%d",
+              bundleIdentifier,
+              pid > 0 ? @"warm-no-scene" : @"cold",
+              pid);
+
+    if (![self requestSystemOpenForBundleIdentifier:bundleIdentifier activateSuspended:YES]) {
+        NSError *error = [NSError errorWithDomain:@"com.dream.splitwindow"
+                                             code:26
+                                         userInfo:@{NSLocalizedDescriptionKey:@"No safe SpringBoard system-open API was available."}];
+        self.state = SWSceneHostStateIdle;
+        completion(nil, error);
         return;
     }
-
-    [self launchColdWindowed:bundleIdentifier];
-    [self pollColdProcessForBundleIdentifier:bundleIdentifier generation:generation attempt:0 completion:completion];
+    [self pollSystemDefaultSceneForBundleIdentifier:bundleIdentifier
+                                          generation:generation
+                                             attempt:0
+                                           escalated:NO
+                                   foregroundHandoff:targetIsSystemForeground
+                                          completion:completion];
 }
 
 - (void)invalidatePresenter {

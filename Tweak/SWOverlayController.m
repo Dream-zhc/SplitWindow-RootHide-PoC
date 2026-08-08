@@ -40,6 +40,8 @@ static BOOL SWSwitcherIsVisible(void) {
 // The root view itself never consumes touches; explicit child views (edge
 // handle, interaction shield, panel and host) do.
 @interface SWFallbackPassThroughWindow : UIWindow
+@property (nonatomic, weak) UIView *interactionShieldView;
+@property (nonatomic) BOOL consumesRootTouches;
 @end
 
 @implementation SWFallbackPassThroughWindow
@@ -49,9 +51,89 @@ static BOOL SWSwitcherIsVisible(void) {
     // back to SpringBoard fullscreen instead of trapping taps in our shield.
     if (SWSwitcherIsVisible()) return nil;
     UIView *hit = [super hitTest:point withEvent:event];
+    if ((hit == self.rootViewController.view || !hit) &&
+        self.consumesRootTouches &&
+        self.interactionShieldView &&
+        !self.interactionShieldView.hidden) {
+        return self.interactionShieldView;
+    }
     if (hit == self.rootViewController.view) return nil;
     return hit;
 }
+@end
+
+@interface SWInteractionShieldView : UIView
+@property (nonatomic) BOOL requiresDoubleTap;
+@property (nonatomic) BOOL immediateTapMode;
+@property (nonatomic, copy) dispatch_block_t tapAction;
+@property (nonatomic) BOOL trackingTap;
+@property (nonatomic) CGPoint touchStartPoint;
+@property (nonatomic) CFTimeInterval previousTapTimestamp;
+@property (nonatomic) CGPoint previousTapPoint;
+@property (nonatomic) NSUInteger tapResetGeneration;
+@end
+
+@implementation SWInteractionShieldView
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)event;
+    UITouch *touch = touches.anyObject;
+    self.trackingTap = touch != nil;
+    if (touch) self.touchStartPoint = [touch locationInView:self];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)event;
+    UITouch *touch = touches.anyObject;
+    if (!touch || !self.trackingTap) return;
+    CGPoint point = [touch locationInView:self];
+    if (hypot(point.x - self.touchStartPoint.x, point.y - self.touchStartPoint.y) > 14.0) {
+        self.trackingTap = NO;
+    }
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)event;
+    UITouch *touch = touches.anyObject;
+    if (!touch || !self.trackingTap) {
+        self.trackingTap = NO;
+        return;
+    }
+    self.trackingTap = NO;
+
+    if (self.immediateTapMode || !self.requiresDoubleTap) {
+        if (self.tapAction) self.tapAction();
+        return;
+    }
+
+    CFTimeInterval timestamp = touch.timestamp;
+    CGPoint point = [touch locationInView:self];
+    BOOL isSecondTap = self.previousTapTimestamp > 0.0 &&
+                       (timestamp - self.previousTapTimestamp) <= 0.34 &&
+                       hypot(point.x - self.previousTapPoint.x,
+                             point.y - self.previousTapPoint.y) <= 44.0;
+    if (isSecondTap) {
+        self.previousTapTimestamp = 0.0;
+        self.tapResetGeneration += 1;
+        if (self.tapAction) self.tapAction();
+        return;
+    }
+
+    self.previousTapTimestamp = timestamp;
+    self.previousTapPoint = point;
+    NSUInteger generation = ++self.tapResetGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.36 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (generation != self.tapResetGeneration) return;
+        self.previousTapTimestamp = 0.0;
+    });
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)touches;
+    (void)event;
+    self.trackingTap = NO;
+}
+
 @end
 
 typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
@@ -63,7 +145,7 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 @interface SWOverlayController ()
 @property (nonatomic) BOOL started;
 @property (nonatomic, strong) UIWindow *overlayWindow;
-@property (nonatomic, strong) UIView *shieldView;
+@property (nonatomic, strong) SWInteractionShieldView *shieldView;
 @property (nonatomic, strong) UIView *handleHitView;
 @property (nonatomic, strong) UIView *handleVisual;
 @property (nonatomic, strong) UIView *panelView;
@@ -73,6 +155,8 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 @property (nonatomic, strong) UIView *resizeHandle;
 @property (nonatomic, strong) SWSceneHost *sceneHost;
 @property (nonatomic, strong) NSCache<NSString *, UIImage *> *iconCache;
+@property (nonatomic, strong) UISelectionFeedbackGenerator *selectionFeedback;
+@property (nonatomic, strong) UIImpactFeedbackGenerator *impactFeedback;
 @property (nonatomic, copy) NSString *panelSignature;
 @property (nonatomic, copy) NSString *openingBundleIdentifier;
 @property (nonatomic) BOOL panelVisible;
@@ -151,6 +235,40 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 
 - (NSString *)frontMostBundleIdentifier {
     return [self bundleIdentifierForApplicationLikeObject:[self frontMostApplication]];
+}
+
+- (BOOL)isBundleIdentifierForeground:(NSString *)bundleIdentifier {
+    if (bundleIdentifier.length == 0) return NO;
+    id controller = SWObjMsg0(NSClassFromString(@"SBApplicationController"), NSSelectorFromString(@"sharedInstance"));
+    id application = SWObjMsg1(controller, NSSelectorFromString(@"applicationWithBundleIdentifier:"), bundleIdentifier);
+    if (!application) application = SWObjMsg1(controller, NSSelectorFromString(@"applicationWithDisplayIdentifier:"), bundleIdentifier);
+    if (!application) return NO;
+
+    for (NSString *name in @[@"isForeground", @"isFrontmost", @"isRunningForeground"]) {
+        SEL selector = NSSelectorFromString(name);
+        NSMethodSignature *signature = [application methodSignatureForSelector:selector];
+        if ([application respondsToSelector:selector] && signature &&
+            signature.numberOfArguments == 2 && signature.methodReturnLength == sizeof(BOOL) &&
+            ((BOOL (*)(id, SEL))objc_msgSend)(application, selector)) {
+            return YES;
+        }
+    }
+
+    id processState = SWObjMsg0(application, NSSelectorFromString(@"processState"));
+    for (NSString *name in @[@"isForeground", @"isFrontmost"]) {
+        SEL selector = NSSelectorFromString(name);
+        NSMethodSignature *signature = [processState methodSignatureForSelector:selector];
+        if ([processState respondsToSelector:selector] && signature &&
+            signature.numberOfArguments == 2 && signature.methodReturnLength == sizeof(BOOL) &&
+            ((BOOL (*)(id, SEL))objc_msgSend)(processState, selector)) {
+            return YES;
+        }
+    }
+
+    NSString *description = [[processState description] lowercaseString];
+    return [description containsString:@"visibility: foreground"] ||
+           [description containsString:@"visibility=foreground"] ||
+           [description containsString:@"foregroundrunning"];
 }
 
 - (UIInterfaceOrientation)frontMostInterfaceOrientation {
@@ -310,6 +428,16 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     return bounds;
 }
 
+- (void)selectionHaptic {
+    [self.selectionFeedback prepare];
+    [self.selectionFeedback selectionChanged];
+}
+
+- (void)lightImpactHaptic {
+    [self.impactFeedback prepare];
+    [self.impactFeedback impactOccurred];
+}
+
 #pragma mark - Window construction
 
 - (UIWindow *)buildSystemOverlayWindow {
@@ -342,11 +470,22 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     if (!self.overlayWindow) return;
     UIView *root = self.overlayWindow.rootViewController.view;
 
-    self.shieldView = [UIView new];
+    self.shieldView = [SWInteractionShieldView new];
     self.shieldView.backgroundColor = UIColor.clearColor;
     self.shieldView.userInteractionEnabled = YES;
+    self.shieldView.exclusiveTouch = YES;
     self.shieldView.hidden = YES;
+    __weak typeof(self) weakSelf = self;
+    self.shieldView.tapAction = ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        [self shieldTapped];
+    };
     [root addSubview:self.shieldView];
+    if ([self.overlayWindow isKindOfClass:[SWFallbackPassThroughWindow class]]) {
+        SWFallbackPassThroughWindow *window = (SWFallbackPassThroughWindow *)self.overlayWindow;
+        window.interactionShieldView = self.shieldView;
+    }
 
     self.hostContainer = [UIView new];
     self.hostContainer.backgroundColor = UIColor.clearColor;
@@ -398,8 +537,15 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     longPress.cancelsTouchesInView = YES;
     [self.handleHitView addGestureRecognizer:longPress];
 
+    UIPanGestureRecognizer *inwardPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleInwardPan:)];
+    inwardPan.minimumNumberOfTouches = 1;
+    inwardPan.maximumNumberOfTouches = 1;
+    inwardPan.cancelsTouchesInView = YES;
+    [self.handleHitView addGestureRecognizer:inwardPan];
+
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTapped:)];
     [tap requireGestureRecognizerToFail:longPress];
+    [tap requireGestureRecognizerToFail:inwardPan];
     [self.handleHitView addGestureRecognizer:tap];
 
     self.overlayWindow.hidden = ![SWPreferences enabled];
@@ -411,10 +557,12 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 
 - (void)start {
     if (self.started) return;
-    SWFileLog(@"START v0.6 overlay begin");
+    SWFileLog(@"START v0.6.1 overlay begin");
     self.sceneHost = [SWSceneHost new];
     self.iconCache = [NSCache new];
     self.iconCache.countLimit = 64;
+    self.selectionFeedback = [UISelectionFeedbackGenerator new];
+    self.impactFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     self.preferredScale = (CGFloat)[SWPreferences windowScale];
     self.handleOnLeft = [SWPreferences edgeHandleOnLeft];
     self.handleNormalizedY = (CGFloat)[SWPreferences edgeHandleNormalizedY];
@@ -443,9 +591,12 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
         return;
     }
     self.started = YES;
-    SWFileLog(@"START v0.6 overlay ready side=%@ y=%.3f",
+    SWFileLog(@"START v0.6.1 overlay ready side=%@ y=%.3f",
               self.handleOnLeft ? @"left" : @"right",
               self.handleNormalizedY);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self prewarmSelectedAppIcons];
+    });
 }
 
 - (void)reloadPreferences {
@@ -575,8 +726,51 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 }
 
 - (void)handleTapped:(__unused UITapGestureRecognizer *)gesture {
-    if (self.panelVisible) [self hidePanel];
-    else [self showPanel];
+    if (self.panelVisible) {
+        [self selectionHaptic];
+        [self hidePanel];
+    } else {
+        [self showPanel];
+    }
+}
+
+- (void)handleInwardPan:(UIPanGestureRecognizer *)gesture {
+    CGPoint translation = [gesture translationInView:self.handleHitView];
+    CGPoint velocity = [gesture velocityInView:self.handleHitView];
+    CGFloat inward = self.handleOnLeft ? translation.x : -translation.x;
+    CGFloat inwardVelocity = self.handleOnLeft ? velocity.x : -velocity.x;
+    CGFloat vertical = fabs(translation.y);
+
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        [self selectionHaptic];
+    }
+
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        // A small elastic travel makes the edge affordance feel attached to the
+        // finger without moving its persisted anchor. Long-press remains the
+        // dedicated gesture for relocating the handle itself.
+        if (inward > 0.0 && fabs(inward) >= vertical * 0.55) {
+            CGFloat travel = MIN(12.0, inward * 0.22);
+            self.handleHitView.transform = CGAffineTransformMakeTranslation(self.handleOnLeft ? travel : -travel, 0.0);
+        }
+        return;
+    }
+
+    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        self.handleHitView.transform = CGAffineTransformIdentity;
+        BOOL horizontalIntent = fabs(inward) >= vertical * 0.55;
+        BOOL shouldOpen = !self.panelVisible && horizontalIntent &&
+                          (inward >= 20.0 || inwardVelocity >= 260.0);
+        BOOL shouldClose = self.panelVisible && horizontalIntent &&
+                           (inward <= -20.0 || inwardVelocity <= -260.0);
+        if (shouldOpen) {
+            [self showPanel];
+        } else if (shouldClose) {
+            [self hidePanel];
+        } else {
+            [self layoutHandleAnimated:YES panelHeight:self.panelVisible ? CGRectGetHeight(self.panelView.bounds) : 0.0];
+        }
+    }
 }
 
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
@@ -587,6 +781,7 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     CGFloat height = 80.0;
 
     if (gesture.state == UIGestureRecognizerStateBegan) {
+        [self lightImpactHaptic];
         if (self.panelVisible) [self hidePanel];
     }
 
@@ -605,6 +800,7 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
         self.handleNormalizedY = MAX(0.10, MIN(self.handleNormalizedY, 0.90));
         [SWPreferences setEdgeHandleOnLeft:self.handleOnLeft normalizedY:self.handleNormalizedY];
         [self layoutHandleAnimated:YES panelHeight:0];
+        [self selectionHaptic];
         SWFileLog(@"HANDLE snap side=%@ y=%.3f",
                   self.handleOnLeft ? @"left" : @"right",
                   self.handleNormalizedY);
@@ -647,6 +843,15 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
         }
     }
     return [UIImage systemImageNamed:@"app.fill"];
+}
+
+- (void)prewarmSelectedAppIcons {
+    if (![SWPreferences enabled]) return;
+    NSArray<NSString *> *bundleIdentifiers = [SWPreferences selectedBundleIdentifiers];
+    for (NSString *bundleIdentifier in bundleIdentifiers) {
+        (void)[self iconForBundleIdentifier:bundleIdentifier];
+    }
+    SWFileLog(@"PERF panel icons prewarmed count=%lu", (unsigned long)bundleIdentifiers.count);
 }
 
 - (void)rebuildPanelIfNeeded {
@@ -711,13 +916,20 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     [self rebuildPanelIfNeeded];
     self.panelVisible = YES;
     self.panelView.hidden = NO;
-    self.panelView.alpha = 0.0;
-    self.panelView.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    self.panelView.alpha = 0.18;
+    CGFloat initialOffset = self.handleOnLeft ? -34.0 : 34.0;
+    self.panelView.transform = CGAffineTransformMakeTranslation(initialOffset, 0.0);
     [self updateInteractionShield];
-    [UIView animateWithDuration:0.14 animations:^{
+    [UIView animateWithDuration:0.26
+                          delay:0.0
+         usingSpringWithDamping:0.88
+          initialSpringVelocity:0.15
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
         self.panelView.alpha = 1.0;
         self.panelView.transform = CGAffineTransformIdentity;
-    }];
+    } completion:nil];
+    [self lightImpactHaptic];
     SWFileLog(@"PANEL show side=%@ handleCenterY=%.1f panelCenterY=%.1f",
               self.handleOnLeft ? @"left" : @"right",
               CGRectGetMidY(self.handleHitView.frame),
@@ -738,6 +950,7 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 - (void)appButtonTapped:(SWAppButton *)sender {
     NSString *bundleIdentifier = sender.bundleIdentifier;
     if (bundleIdentifier.length == 0) return;
+    [self lightImpactHaptic];
     [self hidePanel];
     if (self.sessionState == SWOverlaySessionStateWindowed &&
         [self.sceneHost.bundleIdentifier isEqualToString:bundleIdentifier]) {
@@ -750,15 +963,10 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 #pragma mark - Interaction shield
 
 - (void)configureShieldGesture {
-    for (UIGestureRecognizer *recognizer in self.shieldView.gestureRecognizers.copy) {
-        [self.shieldView removeGestureRecognizer:recognizer];
-    }
-    if (self.shieldView.hidden) return;
-
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(shieldTapped:)];
-    tap.cancelsTouchesInView = YES;
-    tap.numberOfTapsRequired = self.panelVisible ? 1 : ([SWPreferences dismissRequiresDoubleTap] ? 2 : 1);
-    [self.shieldView addGestureRecognizer:tap];
+    self.shieldView.immediateTapMode = self.panelVisible;
+    self.shieldView.requiresDoubleTap = !self.panelVisible && [SWPreferences dismissRequiresDoubleTap];
+    self.shieldView.previousTapTimestamp = 0.0;
+    self.shieldView.tapResetGeneration += 1;
 }
 
 - (void)updateInteractionShield {
@@ -769,6 +977,9 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     self.shieldView.hidden = !shouldShow;
     self.shieldView.frame = self.overlayWindow.rootViewController.view.bounds;
     [self configureShieldGesture];
+    if ([self.overlayWindow isKindOfClass:[SWFallbackPassThroughWindow class]]) {
+        ((SWFallbackPassThroughWindow *)self.overlayWindow).consumesRootTouches = shouldShow;
+    }
 
     UIView *root = self.overlayWindow.rootViewController.view;
     if (self.panelVisible) {
@@ -787,15 +998,26 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     [root bringSubviewToFront:self.handleHitView];
 }
 
-- (void)shieldTapped:(__unused UITapGestureRecognizer *)gesture {
+- (void)shieldTapped {
     // Modal priority: an open app picker owns the first outside tap. It closes
     // only the picker; the mini-window underneath stays alive.
     if (self.panelVisible) {
-        [self hidePanel];
+        // Keep the shield alive until the complete touch sequence has left the
+        // event router. Hiding the overlay in the same touchesEnded callback can
+        // expose the underlying app during cross-scene dispatch on iOS 16.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.018 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (self.panelVisible) [self hidePanel];
+        });
         return;
     }
     if (self.sessionState == SWOverlaySessionStateWindowed) {
-        [self dismissHostPreservingScene:YES];
+        [self lightImpactHaptic];
+        SWFileLog(@"TOUCH shield dismiss double=%d", [SWPreferences dismissRequiresDoubleTap]);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.018 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (self.sessionState == SWOverlaySessionStateWindowed && !self.panelVisible) {
+                [self dismissHostPreservingScene:YES];
+            }
+        });
     }
 }
 
@@ -850,12 +1072,6 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     UIImageView *resizeIcon = [self.resizeHandle viewWithTag:991];
     resizeIcon.frame = CGRectMake(9, 9, 14, 14);
     [self.hostContainer bringSubviewToFront:self.resizeHandle];
-
-    SWFileLog(@"HOST layout logical=%@ preferred=%.3f effective=%.3f frame=%@",
-              NSStringFromCGRect(logical),
-              self.preferredScale,
-              self.effectiveScale,
-              NSStringFromCGRect(hostFrame));
 }
 
 - (void)resizeHostWindow:(UIPanGestureRecognizer *)gesture {
@@ -866,12 +1082,16 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     CGFloat denominator = MAX(180.0, MIN(CGRectGetWidth(logical), CGRectGetHeight(logical)));
     CGFloat delta = (translation.x + translation.y) * 0.5 / denominator;
     if (fabs(delta) > 0.0001) {
-        self.preferredScale = [self clampedPreferredScale:self.preferredScale + delta];
-        [self layoutHostContainer];
+        CGFloat newScale = [self clampedPreferredScale:self.preferredScale + delta];
+        if (fabs(newScale - self.preferredScale) >= 0.0015) {
+            self.preferredScale = newScale;
+            [self layoutHostContainer];
+        }
         [gesture setTranslation:CGPointZero inView:root];
     }
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         [SWPreferences setWindowScale:self.preferredScale];
+        [self selectionHaptic];
         SWFileLog(@"HOST resize preferred=%.3f effective=%.3f", self.preferredScale, self.effectiveScale);
     }
 }
@@ -881,8 +1101,13 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
 - (void)openBundleIdentifier:(NSString *)bundleIdentifier {
     if (bundleIdentifier.length == 0 || ![SWPreferences enabled]) return;
     NSString *frontMost = [self frontMostBundleIdentifier];
-    BOOL foregroundHandoff = [frontMost isEqualToString:bundleIdentifier];
-    SWFileLog(@"OPEN request %@ front=%@ foregroundHandoff=%d", bundleIdentifier, frontMost, foregroundHandoff);
+    BOOL detectedForeground = [self isBundleIdentifierForeground:bundleIdentifier];
+    BOOL foregroundHandoff = [frontMost isEqualToString:bundleIdentifier] || detectedForeground;
+    SWFileLog(@"OPEN request %@ front=%@ detectedForeground=%d foregroundHandoff=%d",
+              bundleIdentifier,
+              frontMost,
+              detectedForeground,
+              foregroundHandoff);
 
     self.openRequestedAt = CFAbsoluteTimeGetCurrent();
     self.openingBundleIdentifier = bundleIdentifier;
@@ -922,8 +1147,14 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     CGRect logical = [self hostLogicalBounds];
     UIInterfaceOrientation contentOrientation = self.hostContentOrientation;
     if (contentOrientation == UIInterfaceOrientationUnknown) contentOrientation = [self activeEnvironmentOrientation];
-    [self.sceneHost updateSceneForHostBounds:logical interfaceOrientation:contentOrientation];
+    // Lay out the remote presentation at its final full-screen logical size
+    // before foregrounding the real system Scene. This lets the first committed
+    // client surface (native launch screen / warm snapshot) arrive already in
+    // the correctly scaled window instead of racing an empty host.
     [self layoutHostContainer];
+    [self.sceneLogicalView layoutIfNeeded];
+    [hostedView layoutIfNeeded];
+    [self.sceneHost updateSceneForHostBounds:logical interfaceOrientation:contentOrientation];
 
     // No synthetic black shell / spinner. The container becomes visible only
     // after the native default Scene has a presentation view and one main-queue
@@ -932,11 +1163,22 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self.hostedView != hostedView || ![self.openingBundleIdentifier isEqualToString:bundleIdentifier]) return;
         self.sessionState = SWOverlaySessionStateWindowed;
+        self.hostContainer.alpha = 0.0;
+        self.hostContainer.transform = CGAffineTransformMakeScale(0.965, 0.965);
         self.hostContainer.hidden = NO;
         self.openingBundleIdentifier = nil;
         [self updateInteractionShield];
         CFAbsoluteTime elapsed = (CFAbsoluteTimeGetCurrent() - self.openRequestedAt) * 1000.0;
         SWFileLog(@"PERF visible %@ %.0fms frame=%@", bundleIdentifier, elapsed, NSStringFromCGRect(self.hostContainer.frame));
+        [UIView animateWithDuration:0.20
+                              delay:0.0
+             usingSpringWithDamping:0.92
+              initialSpringVelocity:0.10
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            self.hostContainer.alpha = 1.0;
+            self.hostContainer.transform = CGAffineTransformIdentity;
+        } completion:nil];
     });
 }
 
@@ -946,6 +1188,8 @@ typedef NS_ENUM(NSInteger, SWOverlaySessionState) {
     self.openingBundleIdentifier = nil;
     self.sessionState = SWOverlaySessionStateIdle;
     self.hostContainer.hidden = YES;
+    self.hostContainer.alpha = 1.0;
+    self.hostContainer.transform = CGAffineTransformIdentity;
     [self.hostedView removeFromSuperview];
     self.hostedView = nil;
     if (preserveScene) [self.sceneHost dismissPresentationPreservingScene];
