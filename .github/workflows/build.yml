@@ -121,7 +121,19 @@ jobs:
           echo "$FEATURE_SLICES"
           echo "$FEATURE_SLICES" | grep -qw arm64
           echo "$FEATURE_SLICES" | grep -qw arm64e
-          strings "$FEATURE" | grep -q 'START-4 explicit activation windows visible'
+          FEATURE_STRINGS="$(mktemp)"
+          PREFS_STRINGS="$(mktemp)"
+          trap 'rm -f "$FEATURE_STRINGS" "$PREFS_STRINGS"' EXIT
+          strings "$FEATURE" > "$FEATURE_STRINGS"
+          require_string() {
+            local haystack="$1"
+            local needle="$2"
+            if ! grep -Fq -- "$needle" "$haystack"; then
+              echo "Missing expected binary string: $needle" >&2
+              exit 1
+            fi
+          }
+          require_string "$FEATURE_STRINGS" 'START-4 explicit activation windows visible'
           echo "--- Preferences bundle ---"
           PREFS_BIN="$PREFS/SplitWindowPrefs"
           test -f "$PREFS_BIN"
@@ -130,25 +142,25 @@ jobs:
             echo "Preferences bundle is missing required Preferences.framework dependency" >&2
             exit 1
           fi
-          strings "$PREFS_BIN" | grep -q 'com.dream.splitwindow/activationRequested'
-          strings "$PREFS_BIN" | grep -q 'SWRootListController'
-          strings "$PREFS_BIN" | grep -q 'SWAppListController'
-          strings "$PREFS_BIN" | grep -q 'showAppPicker'
-          strings "$PREFS_BIN" | grep -q '_applicationIconImageForBundleIdentifier:format:scale:'
-          strings "$FEATURE" | grep -q 'SBApplicationController'
-          strings "$FEATURE" | grep -q 'mainScene'
-          strings "$FEATURE" | grep -q 'initWithScene:debugDescription:'
-          strings "$FEATURE" | grep -q 'RBSProcessHandle'
-          strings "$FEATURE" | grep -q 'FBSMutableSceneDefinition'
-          strings "$FEATURE" | grep -q 'createSceneWithDefinition:initialParameters:'
-          strings "$FEATURE" | grep -q 'SCENE-CREATE success'
-          strings "$FEATURE" | grep -q 'SCENE-SYSTEM found'
-          strings "$FEATURE" | grep -q 'HOST warm-suspend'
-          strings "$FEATURE" | grep -q 'DismissRequiresDoubleTap'
-          strings "$FEATURE" | grep -q '_frontMostAppOrientation'
-          strings "$FEATURE" | grep -q 'SCENE-CREATE default success'
-          strings "$FEATURE" | grep -q 'fallback=default-owned'
-          strings "$FEATURE" | grep -q 'UISupportedInterfaceOrientations~iphone'
+          strings "$PREFS_BIN" > "$PREFS_STRINGS"
+          require_string "$PREFS_STRINGS" 'com.dream.splitwindow/activationRequested'
+          require_string "$PREFS_STRINGS" 'SWRootListController'
+          require_string "$PREFS_STRINGS" 'SWAppListController'
+          require_string "$PREFS_STRINGS" 'showAppPicker'
+          require_string "$PREFS_STRINGS" '_applicationIconImageForBundleIdentifier:format:scale:'
+          require_string "$FEATURE_STRINGS" 'SBApplicationController'
+          require_string "$FEATURE_STRINGS" 'mainScene'
+          require_string "$FEATURE_STRINGS" 'initWithScene:debugDescription:'
+          require_string "$FEATURE_STRINGS" 'RBSProcessHandle'
+          require_string "$FEATURE_STRINGS" 'FBSMutableSceneDefinition'
+          require_string "$FEATURE_STRINGS" 'createSceneWithDefinition:initialParameters:'
+          require_string "$FEATURE_STRINGS" 'SCENE-SYSTEM found'
+          require_string "$FEATURE_STRINGS" 'HOST warm-suspend'
+          require_string "$FEATURE_STRINGS" 'DismissRequiresDoubleTap'
+          require_string "$FEATURE_STRINGS" '_frontMostAppOrientation'
+          require_string "$FEATURE_STRINGS" 'SCENE-CREATE default success'
+          require_string "$FEATURE_STRINGS" 'fallback=default-owned'
+          require_string "$FEATURE_STRINGS" 'UISupportedInterfaceOrientations~iphone'
           plutil -p "$PREF_ENTRY" | grep -q 'SplitWindow.png'
           echo "--- Filter plist ---"
           plutil -p "$PLIST"
