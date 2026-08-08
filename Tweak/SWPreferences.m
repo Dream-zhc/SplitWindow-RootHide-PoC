@@ -20,11 +20,6 @@ NSString * const SWPreferencesDomain = @"com.dream.splitwindow";
     return value == nil ? NO : [value boolValue];
 }
 
-+ (BOOL)showFloatingButton {
-    id value = [self copyPreferenceForKey:@"ShowFloatingButton"];
-    return value == nil ? YES : [value boolValue];
-}
-
 + (BOOL)dismissRequiresDoubleTap {
     id value = [self copyPreferenceForKey:@"DismissRequiresDoubleTap"];
     return value == nil ? NO : [value boolValue];
@@ -33,14 +28,37 @@ NSString * const SWPreferencesDomain = @"com.dream.splitwindow";
 + (double)windowScale {
     id value = [self copyPreferenceForKey:@"WindowScale"];
     double scale = [value respondsToSelector:@selector(doubleValue)] ? [value doubleValue] : 0.72;
-    return MIN(0.95, MAX(0.42, scale));
+    return MIN(0.95, MAX(0.32, scale));
 }
 
 + (void)setWindowScale:(double)scale {
-    scale = MIN(0.95, MAX(0.42, scale));
+    scale = MIN(0.95, MAX(0.32, scale));
     CFStringRef domain = (__bridge CFStringRef)SWPreferencesDomain;
     CFPreferencesSetAppValue(CFSTR("WindowScale"),
                              (__bridge CFPropertyListRef)@(scale),
+                             domain);
+    CFPreferencesAppSynchronize(domain);
+}
+
++ (BOOL)edgeHandleOnLeft {
+    id value = [self copyPreferenceForKey:@"EdgeHandleOnLeft"];
+    return value == nil ? NO : [value boolValue];
+}
+
++ (double)edgeHandleNormalizedY {
+    id value = [self copyPreferenceForKey:@"EdgeHandleNormalizedY"];
+    double normalized = [value respondsToSelector:@selector(doubleValue)] ? [value doubleValue] : 0.48;
+    return MIN(0.90, MAX(0.10, normalized));
+}
+
++ (void)setEdgeHandleOnLeft:(BOOL)onLeft normalizedY:(double)normalizedY {
+    normalizedY = MIN(0.90, MAX(0.10, normalizedY));
+    CFStringRef domain = (__bridge CFStringRef)SWPreferencesDomain;
+    CFPreferencesSetAppValue(CFSTR("EdgeHandleOnLeft"),
+                             (__bridge CFPropertyListRef)@(onLeft),
+                             domain);
+    CFPreferencesSetAppValue(CFSTR("EdgeHandleNormalizedY"),
+                             (__bridge CFPropertyListRef)@(normalizedY),
                              domain);
     CFPreferencesAppSynchronize(domain);
 }

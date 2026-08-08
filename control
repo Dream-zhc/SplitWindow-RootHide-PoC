@@ -1,8 +1,8 @@
 Package: com.dream.splitwindow
-Name: SplitWindow PoC
-Version: 0.5.3
+Name: SplitWindow
+Version: 0.6.0
 Architecture: iphoneos-arm64
-Description: iOS 16 SplitWindow proof-of-concept with an isolated minimal SpringBoard loader for Dopamine RootHide.
+Description: System-level single-instance windowed multitasking for iOS 16 Dopamine RootHide.
 Maintainer: Dream
 Author: Dream
 Section: Tweaks

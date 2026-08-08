@@ -15,10 +15,12 @@ FOUNDATION_EXPORT NSString * const SWPreferencesDomain;
 
 @interface SWPreferences : NSObject
 + (BOOL)enabled;
-+ (BOOL)showFloatingButton;
 + (BOOL)dismissRequiresDoubleTap;
 + (double)windowScale;
 + (void)setWindowScale:(double)scale;
++ (BOOL)edgeHandleOnLeft;
++ (double)edgeHandleNormalizedY;
++ (void)setEdgeHandleOnLeft:(BOOL)onLeft normalizedY:(double)normalizedY;
 + (NSArray<NSString *> *)selectedBundleIdentifiers;
 @end
 

@@ -133,7 +133,7 @@ jobs:
               exit 1
             fi
           }
-          require_string "$FEATURE_STRINGS" 'START-4 explicit activation windows visible'
+          require_string "$FEATURE_STRINGS" 'START v0.6 overlay ready'
           echo "--- Preferences bundle ---"
           PREFS_BIN="$PREFS/SplitWindowPrefs"
           test -f "$PREFS_BIN"
@@ -154,12 +154,18 @@ jobs:
           require_string "$FEATURE_STRINGS" 'RBSProcessHandle'
           require_string "$FEATURE_STRINGS" 'FBSMutableSceneDefinition'
           require_string "$FEATURE_STRINGS" 'createSceneWithDefinition:initialParameters:'
-          require_string "$FEATURE_STRINGS" 'SCENE-SYSTEM found'
-          require_string "$FEATURE_STRINGS" 'HOST warm-suspend'
+          require_string "$FEATURE_STRINGS" 'SCENE-SYSTEM reuse'
+          require_string "$FEATURE_STRINGS" 'SCENE-CREATE canonical success'
+          require_string "$FEATURE_STRINGS" 'STATE backgrounded'
+          require_string "$FEATURE_STRINGS" 'STATE relinquish-fullscreen'
+          require_string "$FEATURE_STRINGS" 'HANDOFF foreground-self'
+          require_string "$FEATURE_STRINGS" 'PERF visible'
+          require_string "$FEATURE_STRINGS" 'HOOK frontDisplayDidChange installed'
+          require_string "$FEATURE_STRINGS" 'HANDLE snap side='
+          require_string "$FEATURE_STRINGS" 'PANEL show side='
+          require_string "$FEATURE_STRINGS" 'EdgeHandleOnLeft'
           require_string "$FEATURE_STRINGS" 'DismissRequiresDoubleTap'
           require_string "$FEATURE_STRINGS" '_frontMostAppOrientation'
-          require_string "$FEATURE_STRINGS" 'SCENE-CREATE default success'
-          require_string "$FEATURE_STRINGS" 'fallback=default-owned'
           require_string "$FEATURE_STRINGS" 'UISupportedInterfaceOrientations~iphone'
           plutil -p "$PREF_ENTRY" | grep -q 'SplitWindow.png'
           echo "--- Filter plist ---"
@@ -182,7 +188,7 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: SplitWindow-v0.5.3-RootHide
+          name: SplitWindow-v0.6.0-RootHide
           path: |
             packages/*.deb
             packages/BUILD-VERIFICATION.txt

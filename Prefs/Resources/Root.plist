@@ -8,8 +8,8 @@
     <array>
         <dict>
             <key>cell</key><string>PSGroupCell</string>
-            <key>label</key><string>SplitWindow PoC</string>
-            <key>footerText</key><string>iOS 16 + Dopamine RootHide 第一版验证。右侧边缘向内滑，或点击悬浮按钮打开 App 面板。</string>
+            <key>label</key><string>SplitWindow</string>
+            <key>footerText</key><string>iOS 16 + Dopamine RootHide。点击边缘横条打开 App 面板；长按拖动横条，松手后自动吸附到最近的左右边缘。</string>
         </dict>
         <dict>
             <key>cell</key><string>PSSwitchCell</string>
@@ -17,13 +17,6 @@
             <key>defaults</key><string>com.dream.splitwindow</string>
             <key>key</key><string>EnabledV040</string>
             <key>default</key><false/>
-        </dict>
-        <dict>
-            <key>cell</key><string>PSSwitchCell</string>
-            <key>label</key><string>显示悬浮按钮</string>
-            <key>defaults</key><string>com.dream.splitwindow</string>
-            <key>key</key><string>ShowFloatingButton</string>
-            <key>default</key><true/>
         </dict>
         <dict>
             <key>cell</key><string>PSSwitchCell</string>
@@ -44,7 +37,7 @@
         </dict>
         <dict>
             <key>cell</key><string>PSGroupCell</string>
-            <key>footerText</key><string>默认单击小窗外部关闭；开启“双击外部关闭小窗”后改为双击。小窗无标题栏，双指拖动窗口，右下角按原比例缩放。</string>
+            <key>footerText</key><string>小窗固定屏幕中心，只对完整 App 画面做等比例缩放。点击面板外只关闭面板；点击/双击小窗外关闭小窗且不会穿透到底层 App。关闭后 App 保留在系统后台。</string>
         </dict>
     </array>
 </dict>
