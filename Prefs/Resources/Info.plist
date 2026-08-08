@@ -15,11 +15,11 @@
     <key>CFBundlePackageType</key>
     <string>BNDL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.5.0</string>
+    <string>0.5.1</string>
     <key>CFBundleSignature</key>
     <string>????</string>
     <key>CFBundleVersion</key>
-    <string>500</string>
+    <string>501</string>
     <key>NSPrincipalClass</key>
     <string>SWRootListController</string>
 </dict>

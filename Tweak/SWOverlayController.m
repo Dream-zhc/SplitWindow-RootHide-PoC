@@ -215,7 +215,7 @@
                                                                                  10,
                                                                                  UIScreen.mainScreen.scale);
         if ([image isKindOfClass:[UIImage class]]) {
-            CGSize size = CGSizeMake(30.0, 30.0);
+            CGSize size = CGSizeMake(38.0, 38.0);
             UIGraphicsBeginImageContextWithOptions(size, NO, UIScreen.mainScreen.scale);
             [image drawInRect:(CGRect){CGPointZero, size}];
             UIImage *scaled = UIGraphicsGetImageFromCurrentImageContext();
@@ -240,9 +240,13 @@
 - (void)rebuildPanel {
     NSArray<NSString *> *apps = [SWPreferences selectedBundleIdentifiers];
     CGRect screen = UIScreen.mainScreen.bounds;
-    CGFloat width = MIN(196.0, CGRectGetWidth(screen) * 0.50);
-    CGFloat rowHeight = 58.0;
-    CGFloat height = MIN(CGRectGetHeight(screen) - 120.0, MAX(78.0, apps.count * rowHeight + 20.0));
+    const NSInteger columns = 3;
+    const CGFloat cellSize = 52.0;
+    const CGFloat padding = 12.0;
+    NSInteger rows = MAX(1, (NSInteger)((apps.count + columns - 1) / columns));
+    NSInteger visibleRows = MIN(rows, 4);
+    CGFloat width = columns * cellSize + padding * 2.0;
+    CGFloat height = visibleRows * cellSize + padding * 2.0;
     CGRect frame = CGRectMake(CGRectGetWidth(screen) - width - 12.0,
                               (CGRectGetHeight(screen) - height) / 2.0,
                               width, height);
@@ -260,7 +264,7 @@
     UIView *root = self.panelWindow.rootViewController.view;
     [root.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
     root.backgroundColor = UIColor.clearColor;
-    root.layer.cornerRadius = 24.0;
+    root.layer.cornerRadius = 26.0;
     root.layer.borderWidth = 0.5;
     root.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.16].CGColor;
     root.clipsToBounds = YES;
@@ -270,35 +274,35 @@
     blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [root addSubview:blur];
 
-    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectInset(root.bounds, 8.0, 9.0)];
+    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectInset(root.bounds, padding, padding)];
     scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    scroll.showsVerticalScrollIndicator = NO;
+    scroll.alwaysBounceVertical = rows > visibleRows;
     [root addSubview:scroll];
 
-    CGFloat y = 0;
-    for (NSString *bundleID in apps) {
-        SWAppButton *button = [SWAppButton buttonWithType:UIButtonTypeSystem];
+    [apps enumerateObjectsUsingBlock:^(NSString *bundleID, NSUInteger index, BOOL *stop) {
+        (void)stop;
+        NSInteger row = (NSInteger)index / columns;
+        NSInteger column = (NSInteger)index % columns;
+        CGFloat buttonSize = 48.0;
+        CGFloat x = column * cellSize + (cellSize - buttonSize) / 2.0;
+        CGFloat y = row * cellSize + (cellSize - buttonSize) / 2.0;
+
+        SWAppButton *button = [SWAppButton buttonWithType:UIButtonTypeCustom];
         button.bundleIdentifier = bundleID;
-        button.frame = CGRectMake(0, y, CGRectGetWidth(scroll.bounds), rowHeight - 5.0);
-        button.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-        [button setTitle:[self displayNameForBundleIdentifier:bundleID] forState:UIControlStateNormal];
-        [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        button.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-        button.backgroundColor = [UIColor colorWithWhite:1 alpha:0.075];
-        button.layer.cornerRadius = 14.0;
-        button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-        button.contentEdgeInsets = UIEdgeInsetsMake(0, 12, 0, 10);
+        button.frame = CGRectMake(x, y, buttonSize, buttonSize);
+        button.backgroundColor = UIColor.clearColor;
+        button.layer.cornerRadius = 13.0;
+        button.accessibilityLabel = [self displayNameForBundleIdentifier:bundleID];
         UIImage *icon = [self iconForBundleIdentifier:bundleID];
         if (icon) {
             [button setImage:icon forState:UIControlStateNormal];
             button.imageView.contentMode = UIViewContentModeScaleAspectFit;
-            button.imageEdgeInsets = UIEdgeInsetsMake(8, 0, 8, 0);
-            button.titleEdgeInsets = UIEdgeInsetsMake(0, 9, 0, 0);
         }
         [button addTarget:self action:@selector(appButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
         [scroll addSubview:button];
-        y += rowHeight;
-    }
-    scroll.contentSize = CGSizeMake(CGRectGetWidth(scroll.bounds), y);
+    }];
+    scroll.contentSize = CGSizeMake(CGRectGetWidth(scroll.bounds), rows * cellSize);
 }
 
 - (void)appButtonTapped:(SWAppButton *)sender {

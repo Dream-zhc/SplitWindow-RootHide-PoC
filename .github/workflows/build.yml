@@ -138,6 +138,10 @@ jobs:
           strings "$FEATURE" | grep -q 'SBApplicationController'
           strings "$FEATURE" | grep -q 'mainScene'
           strings "$FEATURE" | grep -q 'initWithScene:debugDescription:'
+          strings "$FEATURE" | grep -q 'RBSProcessHandle'
+          strings "$FEATURE" | grep -q 'FBSMutableSceneDefinition'
+          strings "$FEATURE" | grep -q 'createSceneWithDefinition:initialParameters:'
+          strings "$FEATURE" | grep -q 'SCENE-CREATE success'
           plutil -p "$PREF_ENTRY" | grep -q 'SplitWindow.png'
           echo "--- Filter plist ---"
           plutil -p "$PLIST"
@@ -159,7 +163,7 @@ jobs:
       - name: Upload DEB
         uses: actions/upload-artifact@v4
         with:
-          name: SplitWindow-v0.5.0-RootHide
+          name: SplitWindow-v0.5.1-RootHide
           path: |
             packages/*.deb
             packages/BUILD-VERIFICATION.txt
